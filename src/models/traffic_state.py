@@ -224,7 +224,12 @@ class SystemMetrics:
         
         # Calculate system-wide totals
         self.total_vehicles_waiting = sum(
-            state["total_queue"] 
+            state["total_queue"]
+            for state in self.intersection_states.values()
+        )
+
+        self.total_vehicles_processed = sum(
+            state.get("vehicles_processed", 0)
             for state in self.intersection_states.values()
         )
     

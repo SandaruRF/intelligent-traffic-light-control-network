@@ -55,20 +55,19 @@ class SensorBehaviour(PeriodicBehaviour):
         # Get current green directions
         green_directions = state.current_phase.get_green_directions()
         
-        # Get queues before update (to track departures)
-        current_queues = state.get_queues_dict()
-        old_total = sum(current_queues.values())
+        # Track departures from simulator
+        old_departures = simulator.total_departures
         
         # Update queues using stochastic simulation
+        current_queues = state.get_queues_dict()
         updated_queues = simulator.update_queues(
             current_queues,
             green_directions,
             time_delta=SENSOR_PERIOD
         )
         
-        # Calculate vehicles processed (departed)
-        new_total = sum(updated_queues.values())
-        vehicles_departed = max(0, old_total - new_total + (simulator.total_arrivals - state.get_total_queue() - simulator.total_departures))
+        # Calculate vehicles processed (departed this cycle)
+        vehicles_departed = simulator.total_departures - old_departures
         
         # Update state
         state.update_queues(updated_queues)
