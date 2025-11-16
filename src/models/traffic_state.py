@@ -174,6 +174,7 @@ class TrafficLightState:
             "queues": self.get_queues_dict(),
             "total_queue": self.get_total_queue(),
             "cycle_count": self.cycle_count,
+            "vehicles_processed": self.total_vehicles_processed,
             "timestamp": self.last_update.isoformat()
         }
     

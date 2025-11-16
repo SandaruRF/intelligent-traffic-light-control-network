@@ -23,6 +23,15 @@ from src.settings import (
 )
 from src.visualization.dashboard import create_animated_dashboard
 
+# GUI Visualization (optional)
+try:
+    from src.visualization.gui_simulator import start_gui, stop_gui
+    GUI_AVAILABLE = True
+except ImportError:
+    GUI_AVAILABLE = False
+    start_gui = lambda: None
+    stop_gui = lambda: None
+
 
 class TrafficLightSystem:
     """
@@ -47,6 +56,12 @@ class TrafficLightSystem:
     async def initialize_agents(self) -> None:
         """Create and start all agents."""
         print("\n📡 Initializing XMPP connection and agents...")
+        
+        # Start GUI if available
+        if GUI_AVAILABLE:
+            print("\n🎨 Starting GUI visualization...")
+            start_gui()
+            print("  ✅ GUI window opened")
         
         # Create coordinator
         print(f"\n  Starting Coordinator at {COORDINATOR_CONFIG['jid']}...")
@@ -95,6 +110,11 @@ class TrafficLightSystem:
             await self.coordinator.stop()
         
         self.is_running = False
+        
+        # Stop GUI
+        if GUI_AVAILABLE:
+            print("  Stopping GUI...")
+            stop_gui()
         
         # Final cleanup
         await asyncio.sleep(1)

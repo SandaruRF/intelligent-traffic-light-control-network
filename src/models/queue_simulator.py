@@ -28,8 +28,8 @@ class QueueSimulator:
     
     def __init__(
         self,
-        arrival_rate: float = 0.3,
-        departure_rate: float = 0.4,
+        arrival_rate: float = 0.15,
+        departure_rate: float = 0.6,
         max_queue_length: int = 30
     ):
         """
@@ -113,8 +113,8 @@ class QueueSimulator:
         
         Normal scenario: Moderate traffic flow.
         """
-        self.arrival_rate = 0.3
-        self.departure_rate = 0.4
+        self.arrival_rate = 0.15
+        self.departure_rate = 0.6
     
     def set_light_traffic(self) -> None:
         """

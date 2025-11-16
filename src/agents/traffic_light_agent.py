@@ -55,20 +55,30 @@ class SensorBehaviour(PeriodicBehaviour):
         # Get current green directions
         green_directions = state.current_phase.get_green_directions()
         
-        # Update queues using stochastic simulation
+        # Get queues before update (to track departures)
         current_queues = state.get_queues_dict()
+        old_total = sum(current_queues.values())
+        
+        # Update queues using stochastic simulation
         updated_queues = simulator.update_queues(
             current_queues,
             green_directions,
             time_delta=SENSOR_PERIOD
         )
         
+        # Calculate vehicles processed (departed)
+        new_total = sum(updated_queues.values())
+        vehicles_departed = max(0, old_total - new_total + (simulator.total_arrivals - state.get_total_queue() - simulator.total_departures))
+        
         # Update state
         state.update_queues(updated_queues)
+        state.total_vehicles_processed += vehicles_departed
         
-        # Log if queues changed significantly
+        # Log if queues changed significantly or vehicles departed
         total_queue = state.get_total_queue()
-        if total_queue > 10:
+        if vehicles_departed > 0 and state.cycle_count % 5 == 0:
+            self.agent.log(f"✅ Processed {vehicles_departed} vehicles | Queue: {total_queue} | Total processed: {state.total_vehicles_processed}")
+        elif total_queue > 10:
             self.agent.log(f"⚠️  High queue: {total_queue} vehicles waiting", "WARNING")
 
 
@@ -128,13 +138,16 @@ class SignalControlBehaviour(PeriodicBehaviour):
     
     def _calculate_adaptive_green_time(self) -> float:
         """
-        Calculate optimal green time using neighbor coordination.
+        Calculate optimal green time using enhanced coordination algorithm.
         
-        Algorithm:
+        Enhanced Algorithm:
         1. Calculate my directional pressure (normalized queue length)
-        2. Get average neighbor pressure
-        3. If I'm more congested than neighbors → increase green time
-        4. If I'm less congested → decrease green time (don't push traffic)
+        2. Compare with opposite direction (internal balance)
+        3. Consider average neighbor pressure (network coordination)
+        4. Apply intelligent adjustments:
+           - If current direction >> opposite: give max green
+           - If current direction < opposite: reduce green quickly
+           - Otherwise: use neighbor-based coordination
         5. Apply limits
         
         Returns:
@@ -142,29 +155,43 @@ class SignalControlBehaviour(PeriodicBehaviour):
         """
         state: TrafficLightState = self.agent.state
         
-        # Step 1: Calculate my pressure for current direction
+        # Step 1: Calculate pressure for current and opposite directions
         if state.current_phase == TrafficPhase.NS_GREEN:
-            my_pressure = state.calculate_pressure("NS")
+            current_pressure = state.calculate_pressure("NS")
+            opposite_pressure = state.calculate_pressure("EW")
         else:
-            my_pressure = state.calculate_pressure("EW")
+            current_pressure = state.calculate_pressure("EW")
+            opposite_pressure = state.calculate_pressure("NS")
         
         # Step 2: Get average neighbor pressure
         avg_neighbor_pressure = state.get_average_neighbor_pressure()
         
-        # Step 3: Calculate pressure difference
-        pressure_diff = my_pressure - avg_neighbor_pressure
+        # Step 3: Enhanced decision logic
         
-        # Step 4: Adjust green time
-        adjustment = pressure_diff * ADJUSTMENT_FACTOR
-        new_green_time = BASE_GREEN_TIME + adjustment
+        # Case 1: Current direction is MUCH busier than opposite (2x threshold)
+        if current_pressure > opposite_pressure * 2.0 and current_pressure > 0.3:
+            new_green_time = MAX_GREEN_TIME
+            reason = "Heavy current direction"
         
-        # Step 5: Enforce limits
+        # Case 2: Opposite direction is busier - switch quickly
+        elif opposite_pressure > current_pressure * 1.5:
+            new_green_time = MIN_GREEN_TIME
+            reason = "Opposite direction needs service"
+        
+        # Case 3: Balanced locally - use neighbor coordination
+        else:
+            pressure_diff = current_pressure - avg_neighbor_pressure
+            adjustment = pressure_diff * ADJUSTMENT_FACTOR
+            new_green_time = BASE_GREEN_TIME + adjustment
+            reason = "Neighbor coordination"
+        
+        # Step 4: Enforce limits
         new_green_time = max(MIN_GREEN_TIME, min(MAX_GREEN_TIME, new_green_time))
         
         # Debug logging
         self.agent.log(
-            f"📊 Pressure: Mine={my_pressure:.2f}, Neighbors={avg_neighbor_pressure:.2f}, "
-            f"Diff={pressure_diff:.2f}, Green={new_green_time:.1f}s",
+            f"📊 Pressure: Current={current_pressure:.2f}, Opposite={opposite_pressure:.2f}, "
+            f"Neighbors={avg_neighbor_pressure:.2f} → Green={new_green_time:.1f}s ({reason})",
             "DEBUG"
         )
         

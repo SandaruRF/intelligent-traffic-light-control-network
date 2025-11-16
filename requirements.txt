@@ -1,6 +1,9 @@
 # Install pre-built wheels first to avoid compilation
---only-binary :all: matplotlib plotly python-dotenv
+--only-binary :all: matplotlib plotly python-dotenv pygame
 
 # SPADE and dependencies - will try to install from wheels
 # If this fails, you need Python 3.11 or 3.12
 spade==3.3.2
+
+# GUI Visualization
+pygame>=2.5.0

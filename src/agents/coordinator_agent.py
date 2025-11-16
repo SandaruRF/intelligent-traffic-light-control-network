@@ -19,6 +19,14 @@ from src.agents.base_agent import BaseTrafficAgent
 from src.models.traffic_state import SystemMetrics
 from src.settings import ONTOLOGY_STATUS, get_all_traffic_light_jids
 
+# GUI Visualization (optional)
+try:
+    from src.visualization.gui_simulator import get_gui
+    GUI_AVAILABLE = True
+except ImportError:
+    GUI_AVAILABLE = False
+    get_gui = lambda: None
+
 
 class MonitorBehaviour(CyclicBehaviour):
     """
@@ -51,6 +59,11 @@ class MonitorBehaviour(CyclicBehaviour):
         
         # Update system metrics
         metrics.update(data)
+        
+        # Update GUI if available
+        gui = get_gui()
+        if gui and GUI_AVAILABLE:
+            gui.update_intersection(data["intersection"], data)
         
         # Store in history for visualization
         intersection = data["intersection"]
@@ -98,26 +111,49 @@ class MetricsReportBehaviour(PeriodicBehaviour):
         avg_queue = metrics.total_vehicles_waiting / active_count if active_count > 0 else 0
         
         # Generate report
+        throughput_per_min = metrics.system_throughput
+        improvement_indicator = "📈" if throughput_per_min > 5 else "📊"
+        
         report = (
             f"\n{'='*60}\n"
-            f"📈 SYSTEM METRICS REPORT\n"
+            f"{improvement_indicator} SYSTEM METRICS REPORT\n"
             f"{'='*60}\n"
             f"Active Intersections: {active_count}\n"
             f"Total Vehicles Waiting: {metrics.total_vehicles_waiting}\n"
             f"Average Queue/Intersection: {avg_queue:.1f}\n"
-            f"System Throughput: {metrics.system_throughput:.2f} vehicles/min\n"
+            f"System Throughput: {throughput_per_min:.2f} vehicles/min {improvement_indicator}\n"
             f"Total Processed: {metrics.total_vehicles_processed}\n"
-            f"{'='*60}\n"
         )
         
+        # Show trend if we have history
+        if hasattr(self.agent, '_last_total_processed'):
+            vehicles_since_last = metrics.total_vehicles_processed - self.agent._last_total_processed
+            report += f"Processed (last 10s): {vehicles_since_last} vehicles\n"
+        
+        report += f"{'='*60}\n"
+        
+        self.agent._last_total_processed = metrics.total_vehicles_processed
+        
         self.agent.log(report)
+        
+        # Update GUI metrics
+        gui = get_gui()
+        if gui and GUI_AVAILABLE:
+            gui.update_metrics({
+                "total_waiting": metrics.total_vehicles_waiting,
+                "avg_queue": avg_queue,
+                "throughput": throughput_per_min,
+                "total_processed": metrics.total_vehicles_processed
+            })
         
         # Detailed per-intersection report
         self.agent.log("Per-Intersection Status:")
         for intersection, state in metrics.intersection_states.items():
+            processed = state.get('vehicles_processed', 0)
             self.agent.log(
                 f"  {intersection}: Queue={state['total_queue']} "
-                f"Phase={state['phase']} Cycle={state['cycle_count']}"
+                f"Phase={state['phase']} Cycle={state['cycle_count']} "
+                f"Processed={processed}"
             )
 
 
