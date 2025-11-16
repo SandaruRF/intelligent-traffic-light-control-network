@@ -149,11 +149,11 @@ class TrafficLightSystem:
         """
         print("\n🦋 BUTTERFLY EFFECT DEMO")
         print("=" * 60)
-        print("Adding 2 vehicles to TL_NORTH and observing cascade effect...")
+        print("Adding 2 vehicles to TL_NORTH straight lane and observing cascade effect...")
         
         if "TL_NORTH" in self.traffic_lights:
-            self.traffic_lights["TL_NORTH"].add_vehicle_burst("N", 2)
-            print("✅ Vehicles added. Watch how the entire network adapts!")
+            self.traffic_lights["TL_NORTH"].add_vehicle_burst("straight", 2)
+            print("✅ Vehicles added to northbound straight lane. Watch the coordination!")
         else:
             print("⚠️  TL_NORTH not found")
     
@@ -165,7 +165,7 @@ class TrafficLightSystem:
         """
         print("\n🔄 DIRECTIONAL CONGESTION DEMO")
         print("=" * 60)
-        print("Creating heavy North-South traffic at all intersections...")
+        print("Creating heavy traffic demand for both axes...")
         
         for agent in self.traffic_lights.values():
             # Increase only NS arrival rates
@@ -297,8 +297,15 @@ class TrafficLightSystem:
         
         print("\nPer-Intersection Status:")
         for name, state in states.items():
-            print(f"  {name:12s}: Queue={state['total_queue']:3d} "
-                  f"Phase={state['phase']:10s} Cycle={state['cycle_count']:3d}")
+            queues = state.get("queues", {})
+            approach = state.get("approach", name.replace("TL_", ""))
+            axis = state.get("axis", "NS")
+            print(
+                f"  {name:12s}: Axis={axis} Dir={approach} "
+                f"Queue={state['total_queue']:3d} (L{queues.get('left', 0)} "
+                f"S{queues.get('straight', 0)} R{queues.get('right', 0)}) "
+                f"Phase={state['phase']:8s} Cycle={state['cycle_count']:3d}"
+            )
     
     def _export_data(self) -> None:
         """Export system data to file."""

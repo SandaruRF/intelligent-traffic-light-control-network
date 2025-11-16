@@ -7,171 +7,167 @@ phases, and queue information.
 
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, List, Optional
 from datetime import datetime
 
 
 class TrafficPhase(Enum):
-    """
-    Enumeration of traffic light phases.
-    
-    NS_GREEN: North-South direction has green light (East-West has red)
-    EW_GREEN: East-West direction has green light (North-South has red)
-    """
-    NS_GREEN = 0
-    EW_GREEN = 1
-    
+    """Multi-phase plan combining straight/right, left-only, and clearance states."""
+
+    NS_STRAIGHT_RIGHT = "NS_SR"
+    CLEARANCE_NS_TO_EW = "CLR_NS_EW"
+    EW_STRAIGHT_RIGHT = "EW_SR"
+    CLEARANCE_EW_TO_NSLEFT = "CLR_EW_NSLEFT"
+    NS_LEFT_ONLY = "NS_LEFT"
+    CLEARANCE_NSLEFT_TO_EWLEFT = "CLR_NSLEFT_EWLEFT"
+    EW_LEFT_ONLY = "EW_LEFT"
+    CLEARANCE_EWLEFT_TO_NS = "CLR_EWLEFT_NS"
+
     def next(self) -> 'TrafficPhase':
-        """Get the next phase in the cycle."""
-        if self == TrafficPhase.NS_GREEN:
-            return TrafficPhase.EW_GREEN
-        return TrafficPhase.NS_GREEN
-    
-    def get_green_directions(self) -> list[str]:
-        """
-        Get the directions that have green light in this phase.
-        
-        Returns:
-            List of direction codes: ["N", "S"] or ["E", "W"]
-        """
-        if self == TrafficPhase.NS_GREEN:
-            return ["N", "S"]
-        return ["E", "W"]
-    
+        """Return the next phase in the predefined sequence."""
+        idx = PHASE_SEQUENCE.index(self)
+        return PHASE_SEQUENCE[(idx + 1) % len(PHASE_SEQUENCE)]
+
+    def is_clearance(self) -> bool:
+        return self not in PHASE_MOVEMENTS
+
+    def is_left_phase(self) -> bool:
+        return self in {TrafficPhase.NS_LEFT_ONLY, TrafficPhase.EW_LEFT_ONLY}
+
+    def is_straight_phase(self) -> bool:
+        return self in {TrafficPhase.NS_STRAIGHT_RIGHT, TrafficPhase.EW_STRAIGHT_RIGHT}
+
+    def active_axis(self) -> Optional[str]:
+        if self in {TrafficPhase.NS_STRAIGHT_RIGHT, TrafficPhase.NS_LEFT_ONLY}:
+            return "NS"
+        if self in {TrafficPhase.EW_STRAIGHT_RIGHT, TrafficPhase.EW_LEFT_ONLY}:
+            return "EW"
+        return None
+
+    def get_green_movements(self, axis: str) -> List[str]:
+        """Return permitted movements for the supplied axis during this phase."""
+        return list(PHASE_MOVEMENTS.get(self, {}).get(axis, []))
+
+    @classmethod
+    def from_string(cls, value: str) -> 'TrafficPhase':
+        """Parse a string (display label or enum value) into a TrafficPhase."""
+        for phase in cls:
+            if value == phase.value or value == str(phase):
+                return phase
+        # Backwards compatibility with legacy labels
+        if value.lower().startswith("ns"):
+            return cls.NS_STRAIGHT_RIGHT
+        if value.lower().startswith("ew"):
+            return cls.EW_STRAIGHT_RIGHT
+        return cls.NS_STRAIGHT_RIGHT
+
     def __str__(self) -> str:
-        """String representation for logging."""
-        if self == TrafficPhase.NS_GREEN:
-            return "NS-Green"
-        return "EW-Green"
+        return PHASE_DISPLAY_NAMES[self]
+
+
+PHASE_SEQUENCE: List[TrafficPhase] = [
+    TrafficPhase.NS_STRAIGHT_RIGHT,
+    TrafficPhase.CLEARANCE_NS_TO_EW,
+    TrafficPhase.EW_STRAIGHT_RIGHT,
+    TrafficPhase.CLEARANCE_EW_TO_NSLEFT,
+    TrafficPhase.NS_LEFT_ONLY,
+    TrafficPhase.CLEARANCE_NSLEFT_TO_EWLEFT,
+    TrafficPhase.EW_LEFT_ONLY,
+    TrafficPhase.CLEARANCE_EWLEFT_TO_NS
+]
+
+PHASE_DISPLAY_NAMES = {
+    TrafficPhase.NS_STRAIGHT_RIGHT: "NS Straight+Right",
+    TrafficPhase.CLEARANCE_NS_TO_EW: "All-Red (NS->EW)",
+    TrafficPhase.EW_STRAIGHT_RIGHT: "EW Straight+Right",
+    TrafficPhase.CLEARANCE_EW_TO_NSLEFT: "All-Red (EW->NS Left)",
+    TrafficPhase.NS_LEFT_ONLY: "NS Protected Left",
+    TrafficPhase.CLEARANCE_NSLEFT_TO_EWLEFT: "All-Red (NS Left->EW Left)",
+    TrafficPhase.EW_LEFT_ONLY: "EW Protected Left",
+    TrafficPhase.CLEARANCE_EWLEFT_TO_NS: "All-Red (EW Left->NS)"
+}
+
+PHASE_MOVEMENTS = {
+    TrafficPhase.NS_STRAIGHT_RIGHT: {"NS": ["straight", "right"], "EW": []},
+    TrafficPhase.EW_STRAIGHT_RIGHT: {"NS": [], "EW": ["straight", "right"]},
+    TrafficPhase.NS_LEFT_ONLY: {"NS": ["left"], "EW": []},
+    TrafficPhase.EW_LEFT_ONLY: {"NS": [], "EW": ["left"]}
+}
 
 
 @dataclass
 class TrafficLightState:
-    """
-    Complete state of a traffic light agent.
-    
-    This dataclass encapsulates all the information needed to represent
-    the current state of a traffic light intersection, including:
-    - Current signal phase
-    - Queue lengths in all directions
-    - Timing information
-    - Performance metrics
-    """
-    
-    # Identity
+    """State for a single approach (north/south/east/west) of the junction."""
+
     intersection_name: str
-    
-    # Current signal state
-    current_phase: TrafficPhase = TrafficPhase.NS_GREEN
-    green_time_remaining: float = 5.0  # seconds
-    
-    # Queue lengths (number of vehicles waiting)
-    queue_north: int = 0
-    queue_south: int = 0
-    queue_east: int = 0
-    queue_west: int = 0
-    
-    # Neighbor information (for coordination)
+    approach_direction: str  # "N", "S", "E", or "W"
+
+    current_phase: TrafficPhase = TrafficPhase.NS_STRAIGHT_RIGHT
+    green_time_remaining: float = 5.0
+    right_turn_free: bool = True
+
+    queue_straight: int = 0
+    queue_left: int = 0
+    queue_right: int = 0
+
     neighbor_queues: Dict[str, int] = field(default_factory=dict)
-    
-    # Performance tracking
+    neighbor_axes: Dict[str, str] = field(default_factory=dict)
+
     cycle_count: int = 0
     total_vehicles_processed: int = 0
     cumulative_wait_time: float = 0.0
-    
-    # Timestamp
+
     last_update: datetime = field(default_factory=datetime.now)
-    
+
+    @property
+    def axis(self) -> str:
+        """Return axis (NS or EW) for this approach."""
+        if self.approach_direction in ("N", "S"):
+            return "NS"
+        return "EW"
+
     def get_total_queue(self) -> int:
-        """Get total number of vehicles waiting at this intersection."""
-        return self.queue_north + self.queue_south + self.queue_east + self.queue_west
-    
-    def get_ns_queue(self) -> int:
-        """Get total queue for North-South direction."""
-        return self.queue_north + self.queue_south
-    
-    def get_ew_queue(self) -> int:
-        """Get total queue for East-West direction."""
-        return self.queue_east + self.queue_west
-    
-    def get_current_direction_queue(self) -> int:
-        """Get queue length for the direction that currently has green light."""
-        if self.current_phase == TrafficPhase.NS_GREEN:
-            return self.get_ns_queue()
-        return self.get_ew_queue()
-    
+        return self.queue_straight + self.queue_left + self.queue_right
+
     def get_queues_dict(self) -> Dict[str, int]:
-        """
-        Get queue lengths as a dictionary.
-        
-        Returns:
-            Dictionary with direction codes as keys and queue lengths as values
-        """
         return {
-            "N": self.queue_north,
-            "S": self.queue_south,
-            "E": self.queue_east,
-            "W": self.queue_west
+            "straight": self.queue_straight,
+            "left": self.queue_left,
+            "right": self.queue_right
         }
-    
+
     def update_queues(self, queues: Dict[str, int]) -> None:
-        """
-        Update queue lengths from a dictionary.
-        
-        Args:
-            queues: Dictionary with direction codes ("N", "S", "E", "W") as keys
-        """
-        self.queue_north = queues.get("N", self.queue_north)
-        self.queue_south = queues.get("S", self.queue_south)
-        self.queue_east = queues.get("E", self.queue_east)
-        self.queue_west = queues.get("W", self.queue_west)
+        self.queue_straight = queues.get("straight", self.queue_straight)
+        self.queue_left = queues.get("left", self.queue_left)
+        self.queue_right = queues.get("right", self.queue_right)
         self.last_update = datetime.now()
-    
-    def calculate_pressure(self, direction: str) -> float:
-        """
-        Calculate traffic pressure for a given direction (normalized).
-        
-        Args:
-            direction: "NS" or "EW"
-        
-        Returns:
-            Normalized pressure value (0.0 to 1.0)
-        """
+
+    def get_green_movements(self) -> List[str]:
+        allowed = self.current_phase.get_green_movements(self.axis)
+        if not self.right_turn_free:
+            allowed = [movement for movement in allowed if movement != "right"]
+        return allowed
+
+    def calculate_pressure(self) -> float:
         from src.settings import MAX_QUEUE
-        
-        if direction == "NS":
-            return self.get_ns_queue() / MAX_QUEUE
-        elif direction == "EW":
-            return self.get_ew_queue() / MAX_QUEUE
-        return 0.0
-    
+        return min(1.0, self.get_total_queue() / MAX_QUEUE)
+
     def get_average_neighbor_pressure(self) -> float:
-        """
-        Calculate average traffic pressure from neighboring intersections.
-        
-        Returns:
-            Average normalized pressure (0.0 to 1.0)
-        """
-        from src.settings import MAX_QUEUE
-        
         if not self.neighbor_queues:
             return 0.0
-        
+        from src.settings import MAX_QUEUE
         total_pressure = sum(queue / MAX_QUEUE for queue in self.neighbor_queues.values())
         return total_pressure / len(self.neighbor_queues)
-    
+
     def to_dict(self) -> Dict:
-        """
-        Convert state to dictionary for message passing.
-        
-        Returns:
-            Dictionary representation of the state
-        """
         return {
             "intersection": self.intersection_name,
+            "approach": self.approach_direction,
+            "axis": self.axis,
             "phase": str(self.current_phase),
             "green_time_remaining": self.green_time_remaining,
             "queues": self.get_queues_dict(),
+            "green_movements": self.get_green_movements(),
             "total_queue": self.get_total_queue(),
             "cycle_count": self.cycle_count,
             "vehicles_processed": self.total_vehicles_processed,
@@ -183,8 +179,8 @@ class TrafficLightState:
         return (
             f"{self.intersection_name}: Cycle={self.cycle_count} "
             f"Phase={self.current_phase} Green={self.green_time_remaining:.1f}s | "
-            f"Queues[N:{self.queue_north} S:{self.queue_south} "
-            f"E:{self.queue_east} W:{self.queue_west}] Total={self.get_total_queue()}"
+            f"Approach {self.approach_direction} Queues[straight:{self.queue_straight} "
+            f"left:{self.queue_left} right:{self.queue_right}] Total={self.get_total_queue()}"
         )
 
 

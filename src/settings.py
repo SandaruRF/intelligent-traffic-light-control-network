@@ -45,40 +45,33 @@ YELLOW_LIGHT_DURATION = 2.0
 # NETWORK TOPOLOGY
 # ============================================================================
 
-# Star topology: Center connected to North, South, East, West
+# Single four-way junction: four autonomous approach agents
 INTERSECTIONS: Dict[str, Dict] = {
-    "TL_CENTER": {
-        "jid": os.getenv("TL_CENTER_JID", "tl_center@localhost"),
-        "password": os.getenv("TL_CENTER_PASSWORD", "center123"),
-        "neighbors": ["TL_NORTH", "TL_SOUTH", "TL_EAST", "TL_WEST"],
-        "position": (0, 0),
-        "display_name": "Center"
-    },
     "TL_NORTH": {
         "jid": os.getenv("TL_NORTH_JID", "tl_north@localhost"),
         "password": os.getenv("TL_NORTH_PASSWORD", "north123"),
-        "neighbors": ["TL_CENTER"],
+        "neighbors": ["TL_SOUTH", "TL_EAST", "TL_WEST"],
         "position": (0, 1),
         "display_name": "North"
     },
     "TL_SOUTH": {
         "jid": os.getenv("TL_SOUTH_JID", "tl_south@localhost"),
         "password": os.getenv("TL_SOUTH_PASSWORD", "south123"),
-        "neighbors": ["TL_CENTER"],
+        "neighbors": ["TL_NORTH", "TL_EAST", "TL_WEST"],
         "position": (0, -1),
         "display_name": "South"
     },
     "TL_EAST": {
         "jid": os.getenv("TL_EAST_JID", "tl_east@localhost"),
         "password": os.getenv("TL_EAST_PASSWORD", "east123"),
-        "neighbors": ["TL_CENTER"],
+        "neighbors": ["TL_WEST", "TL_NORTH", "TL_SOUTH"],
         "position": (1, 0),
         "display_name": "East"
     },
     "TL_WEST": {
         "jid": os.getenv("TL_WEST_JID", "tl_west@localhost"),
         "password": os.getenv("TL_WEST_PASSWORD", "west123"),
-        "neighbors": ["TL_CENTER"],
+        "neighbors": ["TL_EAST", "TL_NORTH", "TL_SOUTH"],
         "position": (-1, 0),
         "display_name": "West"
     }

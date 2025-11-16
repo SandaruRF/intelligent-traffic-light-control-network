@@ -55,47 +55,27 @@ class QueueSimulator:
     def update_queues(
         self,
         current_queues: Dict[str, int],
-        green_directions: List[str],
+        permitted_movements: List[str],
         time_delta: float = 1.0
     ) -> Dict[str, int]:
-        """
-        Update queue lengths based on stochastic arrivals and departures.
-        
-        This is the core simulation logic:
-        1. Vehicles arrive randomly in all directions (Poisson-like process)
-        2. Vehicles depart only from directions with green light
-        3. Queue length is constrained by maximum capacity
-        
-        Args:
-            current_queues: Current queue lengths {"N": int, "S": int, "E": int, "W": int}
-            green_directions: List of directions with green light (e.g., ["N", "S"])
-            time_delta: Time elapsed since last update in seconds (default 1.0)
-        
-        Returns:
-            Updated queue lengths as dictionary
-        """
+        """Update straight/left/right queues for a single approach."""
         updated_queues = current_queues.copy()
-        
-        for direction in ["N", "S", "E", "W"]:
-            # === ARRIVALS (Stochastic) ===
-            # Probability increases with time_delta
+
+        for movement in ["straight", "left", "right"]:
+            if movement not in updated_queues:
+                updated_queues[movement] = 0
             arrival_probability = self.arrival_rate * time_delta
-            
-            # Random arrival event
             if random.random() < arrival_probability:
-                if updated_queues[direction] < self.max_queue_length:
-                    updated_queues[direction] += 1
+                if updated_queues[movement] < self.max_queue_length:
+                    updated_queues[movement] += 1
                     self.total_arrivals += 1
-            
-            # === DEPARTURES (Only when green) ===
-            if direction in green_directions and updated_queues[direction] > 0:
+
+            if movement in permitted_movements and updated_queues[movement] > 0:
                 departure_probability = self.departure_rate * time_delta
-                
-                # Random departure event
                 if random.random() < departure_probability:
-                    updated_queues[direction] = max(0, updated_queues[direction] - 1)
+                    updated_queues[movement] = max(0, updated_queues[movement] - 1)
                     self.total_departures += 1
-        
+
         return updated_queues
     
     def set_rush_hour(self) -> None:
@@ -178,22 +158,10 @@ class QueueSimulator:
         self.total_departures = 0
         self.start_time = datetime.now()
     
-    def simulate_burst(self, direction: str, count: int) -> int:
-        """
-        Simulate a burst of vehicles arriving at once (for testing butterfly effect).
-        
-        Args:
-            direction: Direction code ("N", "S", "E", or "W")
-            count: Number of vehicles to add
-        
-        Returns:
-            Actual number of vehicles added (may be limited by max_queue_length)
-        """
-        if direction not in ["N", "S", "E", "W"]:
+    def simulate_burst(self, movement: str, count: int) -> int:
+        """Return how many vehicles can be injected for a movement queue."""
+        if movement not in ["straight", "left", "right"]:
             return 0
-        
-        # This would typically be called externally, but we return the count
-        # so the caller can add it to their queue
         return min(count, self.max_queue_length)
     
     def __str__(self) -> str:
@@ -209,101 +177,43 @@ class QueueSimulator:
 
 
 class DirectionalQueueSimulator(QueueSimulator):
-    """
-    Enhanced queue simulator with direction-specific arrival rates.
-    
-    This allows simulation of scenarios where traffic is heavier in specific
-    directions (e.g., rush hour with more northbound traffic).
-    """
-    
+    """Queue simulator with multipliers per movement type."""
+
     def __init__(
         self,
         base_arrival_rate: float = 0.3,
         departure_rate: float = 0.4,
         max_queue_length: int = 30
     ):
-        """
-        Initialize directional queue simulator.
-        
-        Args:
-            base_arrival_rate: Base arrival rate for all directions
-            departure_rate: Departure rate when green
-            max_queue_length: Maximum queue per direction
-        """
         super().__init__(base_arrival_rate, departure_rate, max_queue_length)
-        
-        # Direction-specific multipliers (1.0 = normal)
-        self.direction_multipliers = {
-            "N": 1.0,
-            "S": 1.0,
-            "E": 1.0,
-            "W": 1.0
+        self.movement_multipliers = {
+            "straight": 1.0,
+            "left": 1.0,
+            "right": 1.0
         }
-    
-    def set_directional_bias(self, direction: str, multiplier: float) -> None:
-        """
-        Set arrival rate multiplier for a specific direction.
-        
-        Args:
-            direction: Direction code ("N", "S", "E", or "W")
-            multiplier: Arrival rate multiplier (e.g., 2.0 = double traffic)
-        """
-        if direction in self.direction_multipliers:
-            self.direction_multipliers[direction] = max(0.0, multiplier)
-    
-    def set_ns_heavy(self) -> None:
-        """Configure for heavy North-South traffic (directional scenario)."""
-        self.direction_multipliers = {
-            "N": 2.5,
-            "S": 2.5,
-            "E": 0.5,
-            "W": 0.5
-        }
-    
-    def set_ew_heavy(self) -> None:
-        """Configure for heavy East-West traffic."""
-        self.direction_multipliers = {
-            "N": 0.5,
-            "S": 0.5,
-            "E": 2.5,
-            "W": 2.5
-        }
-    
+
+    def set_movement_bias(self, movement: str, multiplier: float) -> None:
+        if movement in self.movement_multipliers:
+            self.movement_multipliers[movement] = max(0.0, multiplier)
+
     def update_queues(
         self,
         current_queues: Dict[str, int],
-        green_directions: List[str],
+        permitted_movements: List[str],
         time_delta: float = 1.0
     ) -> Dict[str, int]:
-        """
-        Update queues with direction-specific arrival rates.
-        
-        Args:
-            current_queues: Current queue lengths
-            green_directions: Directions with green light
-            time_delta: Time elapsed in seconds
-        
-        Returns:
-            Updated queue lengths
-        """
-        updated_queues = current_queues.copy()
-        
-        for direction in ["N", "S", "E", "W"]:
-            # === ARRIVALS with directional bias ===
-            directional_rate = self.arrival_rate * self.direction_multipliers[direction]
+        updated = current_queues.copy()
+        for movement in ["straight", "left", "right"]:
+            directional_rate = self.arrival_rate * self.movement_multipliers[movement]
             arrival_probability = directional_rate * time_delta
-            
             if random.random() < arrival_probability:
-                if updated_queues[direction] < self.max_queue_length:
-                    updated_queues[direction] += 1
+                if updated[movement] < self.max_queue_length:
+                    updated[movement] += 1
                     self.total_arrivals += 1
-            
-            # === DEPARTURES (same logic as parent) ===
-            if direction in green_directions and updated_queues[direction] > 0:
+
+            if movement in permitted_movements and updated[movement] > 0:
                 departure_probability = self.departure_rate * time_delta
-                
                 if random.random() < departure_probability:
-                    updated_queues[direction] = max(0, updated_queues[direction] - 1)
+                    updated[movement] = max(0, updated[movement] - 1)
                     self.total_departures += 1
-        
-        return updated_queues
+        return updated

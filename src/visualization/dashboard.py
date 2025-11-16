@@ -102,13 +102,14 @@ class TrafficDashboard:
             phase: Current traffic phase
             total_queue: Total vehicles waiting
         """
-        # Determine colors
-        if phase == TrafficPhase.NS_GREEN:
-            ns_color = 'green'
-            ew_color = 'red'
+        # Determine colors based on axis activity
+        axis = phase.active_axis()
+        if axis == "NS":
+            ns_color, ew_color = 'green', 'red'
+        elif axis == "EW":
+            ns_color, ew_color = 'red', 'green'
         else:
-            ns_color = 'red'
-            ew_color = 'green'
+            ns_color = ew_color = 'red'
         
         # Draw intersection square
         square = patches.Rectangle(
@@ -171,8 +172,8 @@ class TrafficDashboard:
         for name, pos in positions.items():
             if name in states:
                 state = states[name]
-                phase_str = state.get('phase', 'NS-Green')
-                phase = TrafficPhase.NS_GREEN if 'NS' in phase_str else TrafficPhase.EW_GREEN
+                phase_str = state.get('phase', str(TrafficPhase.NS_STRAIGHT_RIGHT))
+                phase = TrafficPhase.from_string(phase_str)
                 total_queue = state.get('total_queue', 0)
                 
                 self.draw_intersection(
@@ -182,7 +183,7 @@ class TrafficDashboard:
                 # Draw inactive intersection
                 self.draw_intersection(
                     self.ax_network, pos[0], pos[1], name, 
-                    TrafficPhase.NS_GREEN, 0
+                    TrafficPhase.NS_STRAIGHT_RIGHT, 0
                 )
         
         # Set limits

@@ -16,7 +16,7 @@ from datetime import datetime
 from spade.behaviour import CyclicBehaviour, PeriodicBehaviour
 
 from src.agents.base_agent import BaseTrafficAgent
-from src.models.traffic_state import SystemMetrics
+from src.models.traffic_state import SystemMetrics, TrafficPhase
 from src.settings import ONTOLOGY_STATUS, get_all_traffic_light_jids
 
 # GUI Visualization (optional)
@@ -109,6 +109,10 @@ class MetricsReportBehaviour(PeriodicBehaviour):
         
         # Calculate average queue per intersection
         avg_queue = metrics.total_vehicles_waiting / active_count if active_count > 0 else 0
+        axis_loads = {"NS": 0, "EW": 0}
+        for state in metrics.intersection_states.values():
+            axis = state.get("axis", "NS")
+            axis_loads[axis] = axis_loads.get(axis, 0) + state.get("total_queue", 0)
         
         # Generate report
         throughput_per_min = metrics.system_throughput
@@ -135,6 +139,9 @@ class MetricsReportBehaviour(PeriodicBehaviour):
         self.agent._last_total_processed = metrics.total_vehicles_processed
         
         self.agent.log(report)
+        self.agent.log(
+            f"Axis Load → NS:{axis_loads.get('NS', 0)} | EW:{axis_loads.get('EW', 0)}"
+        )
         
         # Update GUI metrics
         gui = get_gui()
@@ -143,7 +150,9 @@ class MetricsReportBehaviour(PeriodicBehaviour):
                 "total_waiting": metrics.total_vehicles_waiting,
                 "avg_queue": avg_queue,
                 "throughput": throughput_per_min,
-                "total_processed": metrics.total_vehicles_processed
+                "total_processed": metrics.total_vehicles_processed,
+                "active_phase": self.agent.get_active_phase(),
+                "axis_loads": axis_loads
             })
         
         # Detailed per-intersection report
@@ -261,6 +270,13 @@ class CoordinatorAgent(BaseTrafficAgent):
             Dictionary with system-wide metrics
         """
         return self.metrics.to_dict()
+    
+    def get_active_phase(self) -> str:
+        """Return the most recently reported phase for the junction."""
+        default_phase = str(TrafficPhase.NS_STRAIGHT_RIGHT)
+        for state in self.metrics.intersection_states.values():
+            return state.get("phase", default_phase)
+        return default_phase
     
     def get_intersection_history(self, intersection: str, limit: int = 50) -> List[Dict]:
         """

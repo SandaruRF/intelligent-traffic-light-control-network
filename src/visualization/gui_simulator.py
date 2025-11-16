@@ -13,9 +13,25 @@ Runs in a separate thread alongside terminal output.
 import pygame
 import threading
 import time
-from typing import Dict, Optional
+import random
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
-import math
+
+from src.models.traffic_state import TrafficPhase
+
+
+@dataclass
+class Vehicle:
+    """Represents a single vehicle sprite travelling through the junction."""
+    approach: str
+    movement: str
+    lane_offset: float
+    active: bool = False
+    progress: float = 0.0
+    speed: float = 0.3  # normalized units per second
+    position: Tuple[int, int] = (0, 0)
+    path: Optional[Dict[str, Tuple[int, int]]] = None
 
 
 class TrafficGUISimulator:
@@ -23,11 +39,10 @@ class TrafficGUISimulator:
     Interactive GUI showing traffic flow and congestion in real-time.
     
     Features:
-    - 5 intersections in star topology
-    - Color-coded traffic lights (red/green)
-    - Animated vehicles in queues
-    - Congestion heatmap
-    - System metrics panel
+    - Single four-way junction with angled approaches
+    - Movement-level signal indicators (left/straight/right)
+    - Animated lane queues per approach
+    - Real-time congestion panels and metrics
     """
     
     def __init__(self, width: int = 1400, height: int = 900):
@@ -47,10 +62,12 @@ class TrafficGUISimulator:
         self.GREEN = (50, 200, 50)
         self.YELLOW = (255, 215, 0)
         self.BLUE = (70, 130, 255)
-        self.GRAY = (100, 100, 100)
+        self.GRAY = (90, 90, 90)
         self.LIGHT_GRAY = (200, 200, 200)
         self.ORANGE = (255, 140, 0)
         self.DARK_GREEN = (0, 100, 0)
+        self.ROAD_DARK = (60, 60, 60)
+        self.ROAD_LIGHT = (80, 80, 80)
         
         # Fonts
         self.font_large = pygame.font.SysFont('Arial', 24, bold=True)
@@ -58,13 +75,70 @@ class TrafficGUISimulator:
         self.font_small = pygame.font.SysFont('Arial', 14)
         self.font_tiny = pygame.font.SysFont('Arial', 12)
         
-        # Intersection positions (center at 700, 450)
-        self.positions = {
-            "TL_CENTER": (700, 450),
-            "TL_NORTH": (700, 150),
-            "TL_SOUTH": (700, 750),
-            "TL_EAST": (1000, 450),
-            "TL_WEST": (400, 450)
+        # Geometry for single junction (centered diamond layout)
+        self.center = (self.width // 2, self.height // 2 + 40)
+        self.approach_configs = {
+            "TL_NORTH": {
+                "direction": "N",
+                "vector": (0.0, -1.0),
+                "panel_pos": (self.center[0] - 140, self.center[1] - 250)
+            },
+            "TL_SOUTH": {
+                "direction": "S",
+                "vector": (0.0, 1.0),
+                "panel_pos": (self.center[0] - 140, self.center[1] + 210)
+            },
+            "TL_EAST": {
+                "direction": "E",
+                "vector": (1.0, 0.0),
+                "panel_pos": (self.center[0] + 180, self.center[1] - 30)
+            },
+            "TL_WEST": {
+                "direction": "W",
+                "vector": (-1.0, 0.0),
+                "panel_pos": (self.center[0] - 320, self.center[1] - 30)
+            }
+        }
+        self.approach_polygons = {
+            name: self._create_approach_polygon(cfg["vector"])
+            for name, cfg in self.approach_configs.items()
+        }
+        self.center_polygon = self._create_center_diamond()
+        
+        # Six-lane configuration: three inbound (facing intersection), three outbound (leaving)
+        # Inbound offsets: left=-40, straight=-20, right=0 (closest to center divider)
+        # Outbound offsets: left=0 (closest to center divider), straight=20, right=40
+        self.inbound_lane_offsets = {"left": -40, "straight": -20, "right": 0}
+        self.outbound_lane_offsets = {"left": 0, "straight": 20, "right": 40}
+        self.lane_offsets = self.inbound_lane_offsets  # alias for waiting vehicle creation
+        self.exit_lane_offsets = self.outbound_lane_offsets  # alias for exit path building
+        self.movement_colors = {
+            "left": self.ORANGE,
+            "straight": self.GREEN,
+            "right": self.BLUE
+        }
+        self.movement_labels = {"left": "L", "straight": "S", "right": "R"}
+        self.movement_targets = {
+            "TL_NORTH": {"straight": "TL_SOUTH", "left": "TL_EAST", "right": "TL_WEST"},
+            "TL_SOUTH": {"straight": "TL_NORTH", "left": "TL_WEST", "right": "TL_EAST"},
+            "TL_EAST": {"straight": "TL_WEST", "left": "TL_NORTH", "right": "TL_SOUTH"},
+            "TL_WEST": {"straight": "TL_EAST", "left": "TL_SOUTH", "right": "TL_NORTH"}
+        }
+        
+        self.vehicle_spawn_distance = 280
+        self.vehicle_entry_distance = 90
+        self.vehicle_wait_spacing = 18
+        self.vehicle_size = (12, 8)
+        self.vehicle_speed_range = (0.25, 0.5)
+        
+        self.waiting_queues: Dict[str, Dict[str, List[Vehicle]]] = {
+            name: {move: [] for move in self.movement_labels}
+            for name in self.approach_configs
+        }
+        self.active_vehicles: List[Vehicle] = []
+        self.release_cooldowns: Dict[str, Dict[str, float]] = {
+            name: {move: 0.0 for move in self.movement_labels}
+            for name in self.approach_configs
         }
         
         # State data
@@ -73,8 +147,11 @@ class TrafficGUISimulator:
             "total_waiting": 0,
             "throughput": 0.0,
             "total_processed": 0,
-            "avg_queue": 0.0
+            "avg_queue": 0.0,
+            "active_phase": str(TrafficPhase.NS_STRAIGHT_RIGHT),
+            "axis_loads": {"NS": 0, "EW": 0}
         }
+        self.state_lock = threading.Lock()
         
         # Animation
         self.running = False
@@ -103,7 +180,9 @@ class TrafficGUISimulator:
             name: Intersection name (e.g., "TL_CENTER")
             state: State dictionary with phase, queues, etc.
         """
-        self.intersection_states[name] = state
+        with self.state_lock:
+            self.intersection_states[name] = state
+            self._sync_waiting_queue(name, state)
         
     def update_metrics(self, metrics: Dict):
         """
@@ -112,30 +191,63 @@ class TrafficGUISimulator:
         Args:
             metrics: Dictionary with system-wide metrics
         """
-        self.system_metrics = metrics
+        with self.state_lock:
+            self.system_metrics = metrics
+
+    def _sync_waiting_queue(self, name: str, state: Dict) -> None:
+        if name not in self.waiting_queues:
+            return
+        queues = state.get("queues", {})
+        for movement in self.movement_labels:
+            target = max(0, queues.get(movement, 0))
+            lane_queue = self.waiting_queues[name][movement]
+            diff = target - len(lane_queue)
+            if diff > 0:
+                for _ in range(diff):
+                    lane_queue.append(self._create_waiting_vehicle(name, movement))
+            elif diff < 0:
+                for _ in range(-diff):
+                    if lane_queue:
+                        lane_queue.pop()
+        self._update_waiting_positions(name)
+
+    def _create_waiting_vehicle(self, name: str, movement: str) -> Vehicle:
+        lane_offset = self.lane_offsets[movement]
+        vehicle = Vehicle(
+            approach=name,
+            movement=movement,
+            lane_offset=lane_offset,
+            speed=random.uniform(*self.vehicle_speed_range)
+        )
+        vehicle.position = self._point_on_approach(name, self.vehicle_entry_distance, lane_offset)
+        return vehicle
+
+    def _update_waiting_positions(self, name: str) -> None:
+        base_distance = self.vehicle_entry_distance
+        for movement, lane_queue in self.waiting_queues[name].items():
+            for idx, vehicle in enumerate(lane_queue):
+                distance = base_distance + idx * self.vehicle_wait_spacing
+                vehicle.position = self._point_on_approach(name, distance, vehicle.lane_offset)
         
     def _run_gui(self):
         """Main GUI loop (runs in separate thread)."""
         while self.running:
-            # Handle events
+            dt = self.clock.tick(50) / 1000.0  # target 50 FPS
+            
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
-                    
-            # Clear screen
-            self.screen.fill(self.BLACK)
             
-            # Draw components
+            self._update_vehicle_system(dt)
+            
+            self.screen.fill(self.BLACK)
             self._draw_title()
             self._draw_roads()
             self._draw_intersections()
-            self._draw_vehicles()
+            self._draw_active_vehicles()
             self._draw_metrics_panel()
             self._draw_legend()
-            
-            # Update display
             pygame.display.flip()
-            self.clock.tick(30)  # 30 FPS
             self.frame_count += 1
             
     def _draw_title(self):
@@ -145,212 +257,184 @@ class TrafficGUISimulator:
         
         subtitle = self.font_small.render("Multi-Agent System Simulation - Real-time View", True, self.LIGHT_GRAY)
         self.screen.blit(subtitle, (20, 50))
+    
+    def _update_vehicle_system(self, dt: float) -> None:
+        with self.state_lock:
+            for name, state in self.intersection_states.items():
+                allowed = state.get("green_movements", [])
+                for movement in allowed:
+                    self._maybe_release_vehicle(name, movement, dt)
+            self._advance_active_vehicles(dt)
+
+    def _maybe_release_vehicle(self, name: str, movement: str, dt: float) -> None:
+        if name not in self.waiting_queues:
+            return
+        cooldown = self.release_cooldowns[name][movement]
+        cooldown = max(0.0, cooldown - dt)
+        lane_queue = self.waiting_queues[name][movement]
+        if cooldown <= 0 and lane_queue:
+            vehicle = lane_queue.pop(0)
+            vehicle.active = True
+            vehicle.progress = 0.0
+            vehicle.speed = random.uniform(*self.vehicle_speed_range)
+            vehicle.path = self._build_path(vehicle, start_override=vehicle.position)
+            self.active_vehicles.append(vehicle)
+            cooldown = 0.45  # seconds before next vehicle in same lane
+            self._update_waiting_positions(name)
+        self.release_cooldowns[name][movement] = cooldown
+
+    def _advance_active_vehicles(self, dt: float) -> None:
+        removal: List[Vehicle] = []
+        for vehicle in self.active_vehicles:
+            vehicle.progress += vehicle.speed * dt
+            vehicle.position = self._path_position(vehicle)
+            if vehicle.progress >= 1.05:
+                removal.append(vehicle)
+        for vehicle in removal:
+            self.active_vehicles.remove(vehicle)
+
+    def _build_path(self, vehicle: Vehicle, start_override: Optional[Tuple[int, int]] = None) -> Dict:
+        # Vehicle starts in its inbound lane at current approach
+        start = start_override or self._point_on_approach(
+            vehicle.approach,
+            self.vehicle_spawn_distance,
+            vehicle.lane_offset
+        )
+        # Vehicle exits into the corresponding outbound lane of the target approach
+        target_approach = self.movement_targets[vehicle.approach][vehicle.movement]
+        # Map movement to outbound lane on target road (left->left, straight->straight, right->right)
+        exit_offset = self.outbound_lane_offsets[vehicle.movement]
+        end = self._point_on_approach(target_approach, self.vehicle_spawn_distance, exit_offset)
+        
+        if vehicle.movement == "straight":
+            return {"type": "line", "start": start, "end": end}
+        
+        # Turning movements use curved paths
+        approach_vec = self.approach_configs[vehicle.approach]["vector"]
+        perp = (-approach_vec[1], approach_vec[0])
+        curvature = 85 if vehicle.movement == "left" else -85
+        control = (
+            self.center[0] + perp[0] * curvature,
+            self.center[1] + perp[1] * curvature
+        )
+        return {"type": "curve", "start": start, "control": control, "end": end}
+
+    def _path_position(self, vehicle: Vehicle) -> Tuple[int, int]:
+        if not vehicle.path:
+            return vehicle.position
+        t = min(1.0, max(0.0, vehicle.progress))
+        if vehicle.path["type"] == "line":
+            return self._lerp(vehicle.path["start"], vehicle.path["end"], t)
+        return self._quadratic_bezier(
+            vehicle.path["start"],
+            vehicle.path["control"],
+            vehicle.path["end"],
+            t
+        )
+
+    @staticmethod
+    def _lerp(a: Tuple[int, int], b: Tuple[int, int], t: float) -> Tuple[int, int]:
+        return (
+            int(a[0] + (b[0] - a[0]) * t),
+            int(a[1] + (b[1] - a[1]) * t)
+        )
+
+    @staticmethod
+    def _quadratic_bezier(p0: Tuple[int, int], p1: Tuple[int, int], p2: Tuple[int, int], t: float) -> Tuple[int, int]:
+        u = 1 - t
+        x = u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0]
+        y = u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]
+        return (int(x), int(y))
         
     def _draw_roads(self):
-        """Draw road network."""
-        center_x, center_y = self.positions["TL_CENTER"]
+        """Draw single-junction diamond road layout with angled approaches."""
+        for name, polygon in self.approach_polygons.items():
+            pygame.draw.polygon(self.screen, self.ROAD_DARK, polygon)
+            pygame.draw.polygon(self.screen, self.GRAY, polygon, 2)
+            self._draw_lane_markings(name)
         
-        # Horizontal road (East-West)
-        pygame.draw.rect(self.screen, self.GRAY, (50, center_y - 40, 1300, 80))
-        # Center line
-        for x in range(50, 1350, 40):
-            pygame.draw.line(self.screen, self.YELLOW, (x, center_y), (x + 20, center_y), 2)
-            
-        # Vertical road (North-South)
-        pygame.draw.rect(self.screen, self.GRAY, (center_x - 40, 50, 80, 800))
-        # Center line
-        for y in range(50, 850, 40):
-            pygame.draw.line(self.screen, self.YELLOW, (center_x, y), (center_x, y + 20), 2)
-            
+        # Central diamond intersection
+        pygame.draw.polygon(self.screen, (50, 50, 50), self.center_polygon)
+        pygame.draw.polygon(self.screen, self.WHITE, self.center_polygon, 2)
+        self._draw_intersection_status()
+
     def _draw_intersections(self):
-        """Draw all intersections with traffic lights."""
-        for name, pos in self.positions.items():
-            state = self.intersection_states.get(name, {})
-            self._draw_intersection(name, pos, state)
+        """Render approach-level panels, signals, and vehicle queues."""
+        with self.state_lock:
+            states = {name: dict(state) for name, state in self.intersection_states.items()}
+            waiting_snapshot = {}
+            for name in self.approach_configs:
+                lanes = self.waiting_queues.get(name, {})
+                waiting_snapshot[name] = {
+                    movement: [vehicle.position for vehicle in lanes.get(movement, [])]
+                    for movement in self.movement_labels
+                }
+        for name, cfg in self.approach_configs.items():
+            state = states.get(name, {})
+            lane_positions = waiting_snapshot.get(name, {})
+            self._draw_signal_cluster(name, state)
+            self._draw_waiting_vehicles(lane_positions)
+            self._draw_queue_panel(name, cfg, state)
             
-    def _draw_intersection(self, name: str, pos: tuple, state: Dict):
-        """
-        Draw a single intersection with traffic light.
-        
-        Args:
-            name: Intersection name
-            pos: (x, y) position
-            state: Current state dictionary
-        """
-        x, y = pos
-        
-        # Get state info
-        phase = state.get("phase", "NS-Green")
-        queues = state.get("queues", {"N": 0, "S": 0, "E": 0, "W": 0})
-        total_queue = state.get("total_queue", 0)
-        cycle = state.get("cycle_count", 0)
-        processed = state.get("vehicles_processed", 0)
-        
-        # Intersection box (congestion color-coded)
-        if total_queue > 20:
-            bg_color = (150, 0, 0)  # Dark red
-        elif total_queue > 10:
-            bg_color = (200, 100, 0)  # Orange
-        elif total_queue > 5:
-            bg_color = (200, 200, 0)  # Yellow-ish
-        else:
-            bg_color = (0, 100, 0)  # Green
-            
-        pygame.draw.rect(self.screen, bg_color, (x - 60, y - 60, 120, 120))
-        pygame.draw.rect(self.screen, self.WHITE, (x - 60, y - 60, 120, 120), 3)
-        
-        # Intersection name
-        name_short = name.replace("TL_", "")
-        text = self.font_medium.render(name_short, True, self.WHITE)
-        text_rect = text.get_rect(center=(x, y - 35))
-        self.screen.blit(text, text_rect)
-        
-        # Traffic lights (4 directions)
-        self._draw_traffic_light(x, y - 20, phase, "NS")  # North
-        self._draw_traffic_light(x, y + 20, phase, "NS")  # South
-        self._draw_traffic_light(x - 20, y, phase, "EW")  # West
-        self._draw_traffic_light(x + 20, y, phase, "EW")  # East
-        
-        # Queue numbers
-        queue_text = self.font_small.render(f"Q:{total_queue}", True, self.WHITE)
-        self.screen.blit(queue_text, (x - 25, y + 35))
-        
-        # Cycle count
-        cycle_text = self.font_tiny.render(f"C:{cycle}", True, self.LIGHT_GRAY)
-        self.screen.blit(cycle_text, (x - 25, y + 50))
-        
-        # Draw queue indicators
-        self._draw_queue_indicators(x, y, queues)
-        
-    def _draw_traffic_light(self, x: int, y: int, phase: str, direction: str):
-        """
-        Draw a traffic light signal.
-        
-        Args:
-            x, y: Position
-            phase: Current phase (e.g., "NS-Green")
-            direction: "NS" or "EW"
-        """
-        # Determine if this direction has green
-        is_green = False
-        if "NS" in phase and direction == "NS":
-            is_green = True
-        elif "EW" in phase and direction == "EW":
-            is_green = True
-            
-        color = self.GREEN if is_green else self.RED
-        pygame.draw.circle(self.screen, color, (x, y), 8)
-        pygame.draw.circle(self.screen, self.WHITE, (x, y), 8, 1)
-        
-    def _draw_queue_indicators(self, x: int, y: int, queues: Dict):
-        """
-        Draw queue length indicators around intersection.
-        
-        Args:
-            x, y: Intersection center
-            queues: Queue dictionary {"N": int, "S": int, "E": int, "W": int}
-        """
-        # North queue
-        self._draw_queue_bar(x, y - 100, queues.get("N", 0), "vertical")
-        # South queue
-        self._draw_queue_bar(x, y + 100, queues.get("S", 0), "vertical")
-        # East queue
-        self._draw_queue_bar(x + 100, y, queues.get("E", 0), "horizontal")
-        # West queue
-        self._draw_queue_bar(x - 100, y, queues.get("W", 0), "horizontal")
-        
-    def _draw_queue_bar(self, x: int, y: int, queue_length: int, orientation: str):
-        """
-        Draw a queue length bar.
-        
-        Args:
-            x, y: Position
-            queue_length: Number of vehicles
-            orientation: "vertical" or "horizontal"
-        """
-        if queue_length == 0:
+    def _draw_signal_cluster(self, name: str, state: Dict):
+        """Render movement-level signal indicators for an approach."""
+        allowed = set(state.get("green_movements", []))
+        # Position signals above the three inbound lanes
+        for movement, offset in self.inbound_lane_offsets.items():
+            indicator_pos = self._point_on_approach(name, 60, offset)
+            color = self.GREEN if movement in allowed else self.RED
+            pygame.draw.circle(self.screen, color, indicator_pos, 10)
+            pygame.draw.circle(self.screen, self.WHITE, indicator_pos, 10, 2)
+            label = self.font_tiny.render(self.movement_labels[movement], True, self.BLACK if movement in allowed else self.WHITE)
+            label_rect = label.get_rect(center=indicator_pos)
+            self.screen.blit(label, label_rect)
+
+    def _draw_waiting_vehicles(self, lane_positions: Dict[str, List[Tuple[int, int]]]) -> None:
+        for movement, positions in lane_positions.items():
+            for pos in positions:
+                self._draw_vehicle_box(pos, idle=True)
+
+    def _draw_vehicle_box(self, position: Tuple[int, int], idle: bool = False) -> None:
+        if not position:
             return
-            
-        # Color based on congestion
-        if queue_length > 15:
-            color = self.RED
-        elif queue_length > 8:
-            color = self.ORANGE
-        else:
-            color = self.YELLOW
-            
-        # Draw bar
-        max_length = 60
-        bar_length = min(queue_length * 3, max_length)
-        
-        if orientation == "vertical":
-            pygame.draw.rect(self.screen, color, (x - 5, y - bar_length // 2, 10, bar_length))
-            # Number
-            text = self.font_tiny.render(str(queue_length), True, self.WHITE)
-            self.screen.blit(text, (x + 10, y - 5))
-        else:  # horizontal
-            pygame.draw.rect(self.screen, color, (x - bar_length // 2, y - 5, bar_length, 10))
-            # Number
-            text = self.font_tiny.render(str(queue_length), True, self.WHITE)
-            self.screen.blit(text, (x - 5, y + 10))
-            
-    def _draw_vehicles(self):
-        """Draw animated vehicles in queues."""
-        for name, pos in self.positions.items():
-            state = self.intersection_states.get(name, {})
-            queues = state.get("queues", {"N": 0, "S": 0, "E": 0, "W": 0})
-            
-            x, y = pos
-            
-            # Draw vehicles approaching from each direction
-            # North (vehicles moving south)
-            self._draw_vehicle_queue(x, y - 140, queues.get("N", 0), "down")
-            # South (vehicles moving north)
-            self._draw_vehicle_queue(x, y + 140, queues.get("S", 0), "up")
-            # East (vehicles moving west)
-            self._draw_vehicle_queue(x + 140, y, queues.get("E", 0), "left")
-            # West (vehicles moving east)
-            self._draw_vehicle_queue(x - 140, y, queues.get("W", 0), "right")
-            
-    def _draw_vehicle_queue(self, x: int, y: int, count: int, direction: str):
-        """
-        Draw vehicles in a queue.
-        
-        Args:
-            x, y: Starting position
-            count: Number of vehicles
-            direction: "up", "down", "left", "right"
-        """
-        vehicle_size = 8
-        spacing = 12
-        
-        for i in range(min(count, 8)):  # Draw max 8 vehicles
-            offset = i * spacing
-            
-            if direction == "down":
-                vx, vy = x, y + offset
-            elif direction == "up":
-                vx, vy = x, y - offset
-            elif direction == "right":
-                vx, vy = x + offset, y
-            else:  # left
-                vx, vy = x - offset, y
-                
-            # Vehicle color (alternating for animation)
-            if (self.frame_count // 10 + i) % 2 == 0:
-                color = self.BLUE
-            else:
-                color = (100, 150, 255)
-                
-            pygame.draw.rect(self.screen, color, (vx - vehicle_size // 2, vy - vehicle_size // 2, vehicle_size, vehicle_size))
-            pygame.draw.rect(self.screen, self.WHITE, (vx - vehicle_size // 2, vy - vehicle_size // 2, vehicle_size, vehicle_size), 1)
-            
+        width, height = self.vehicle_size
+        rect = pygame.Rect(0, 0, width, height)
+        rect.center = position
+        color = (90, 150, 255) if idle else self.BLUE
+        pygame.draw.rect(self.screen, color, rect)
+        pygame.draw.rect(self.screen, self.WHITE, rect, 1)
+
+    def _draw_active_vehicles(self) -> None:
+        with self.state_lock:
+            positions = [vehicle.position for vehicle in self.active_vehicles]
+        for pos in positions:
+            self._draw_vehicle_box(pos, idle=False)
+
+    def _draw_queue_panel(self, name: str, cfg: Dict, state: Dict):
+        panel_x, panel_y = cfg["panel_pos"]
+        panel_width = 140
+        panel_height = 70
+        pygame.draw.rect(self.screen, (25, 25, 25), (panel_x, panel_y, panel_width, panel_height))
+        pygame.draw.rect(self.screen, self.WHITE, (panel_x, panel_y, panel_width, panel_height), 1)
+        label = self.font_small.render(f"{cfg['direction']} | Q:{state.get('total_queue', 0)}", True, self.WHITE)
+        self.screen.blit(label, (panel_x + 8, panel_y + 6))
+        queues = state.get("queues", {"left": 0, "straight": 0, "right": 0})
+        detail = self.font_tiny.render(
+            f"L:{queues.get('left', 0)} S:{queues.get('straight', 0)} R:{queues.get('right', 0)}",
+            True,
+            self.LIGHT_GRAY
+        )
+        self.screen.blit(detail, (panel_x + 8, panel_y + 28))
+        processed = state.get("vehicles_processed", 0)
+        proc_text = self.font_tiny.render(f"Proc:{processed}", True, self.LIGHT_GRAY)
+        self.screen.blit(proc_text, (panel_x + 8, panel_y + 48))
+
     def _draw_metrics_panel(self):
         """Draw system metrics panel."""
         panel_x = 20
         panel_y = 100
-        panel_width = 320
-        panel_height = 280
+        panel_width = 330
+        panel_height = 320
         
         # Panel background
         pygame.draw.rect(self.screen, (30, 30, 30), (panel_x, panel_y, panel_width, panel_height))
@@ -368,6 +452,7 @@ class TrafficGUISimulator:
             ("Avg Queue:", f"{self.system_metrics.get('avg_queue', 0):.1f}", self.YELLOW),
             ("Throughput:", f"{self.system_metrics.get('throughput', 0):.1f}/min", self.GREEN),
             ("Total Processed:", str(self.system_metrics.get("total_processed", 0)), self.BLUE),
+            ("Active Phase:", self._current_phase(), self.LIGHT_GRAY)
         ]
         
         for label, value, color in metrics:
@@ -386,25 +471,34 @@ class TrafficGUISimulator:
         status_text = self.font_small.render("Status:", True, self.LIGHT_GRAY)
         self.screen.blit(status_text, (panel_x + 15, y_offset))
         
-        # Active agents count
         active_count = len(self.intersection_states)
-        if active_count >= 5:
-            status = "OPERATIONAL"
-            status_color = self.GREEN
-        elif active_count > 0:
-            status = "PARTIAL"
-            status_color = self.ORANGE
-        else:
-            status = "OFFLINE"
-            status_color = self.RED
-            
+        status = "OPERATIONAL" if active_count == 4 else ("PARTIAL" if active_count > 0 else "OFFLINE")
+        status_color = self.GREEN if status == "OPERATIONAL" else (self.ORANGE if status == "PARTIAL" else self.RED)
         status_val = self.font_medium.render(status, True, status_color)
-        self.screen.blit(status_val, (panel_x + 80, y_offset - 2))
-        
-        # Agent count
+        self.screen.blit(status_val, (panel_x + 110, y_offset - 2))
         y_offset += 30
-        agent_text = self.font_small.render(f"Active Agents: {active_count}/5", True, self.WHITE)
+        agent_text = self.font_small.render(f"Active Agents: {active_count}/4", True, self.WHITE)
         self.screen.blit(agent_text, (panel_x + 15, y_offset))
+        
+        # Per-approach snapshot
+        y_offset += 20
+        header = self.font_small.render("Approach Queues", True, self.LIGHT_GRAY)
+        self.screen.blit(header, (panel_x + 15, y_offset))
+        y_offset += 20
+        for name in ["TL_NORTH", "TL_EAST", "TL_SOUTH", "TL_WEST"]:
+            state = self.intersection_states.get(name)
+            queue = state.get("total_queue", 0) if state else 0
+            label = name.replace("TL_", "")
+            text = self.font_tiny.render(f"{label:<5} {queue:>2} veh", True, self.WHITE)
+            self.screen.blit(text, (panel_x + 20, y_offset))
+            y_offset += 16
+        axis_loads = self.system_metrics.get("axis_loads", {})
+        axis_text = self.font_tiny.render(
+            f"Axis Load NS:{axis_loads.get('NS', 0)} | EW:{axis_loads.get('EW', 0)}",
+            True,
+            self.LIGHT_GRAY
+        )
+        self.screen.blit(axis_text, (panel_x + 15, panel_y + panel_height - 30))
         
     def _draw_legend(self):
         """Draw legend explaining colors."""
@@ -423,12 +517,12 @@ class TrafficGUISimulator:
         
         # Legend items
         items = [
-            ("Traffic Light:", self.GREEN, "Green - Active"),
-            ("", self.RED, "Red - Stopped"),
-            ("Congestion:", (0, 100, 0), "Low (0-5)"),
-            ("", (200, 200, 0), "Medium (6-10)"),
-            ("", (200, 100, 0), "High (11-20)"),
-            ("", (150, 0, 0), "Critical (>20)"),
+            ("Lane Colors:", self.movement_colors["left"], "Left turns"),
+            ("", self.movement_colors["straight"], "Straight"),
+            ("", self.movement_colors["right"], "Right turns"),
+            ("Signals:", self.GREEN, "Movement permitted"),
+            ("", self.RED, "Movement stopped"),
+            ("Center Text:", self.WHITE, "Active NS/EW phase"),
         ]
         
         for label, color, desc in items:
@@ -445,6 +539,107 @@ class TrafficGUISimulator:
             self.screen.blit(desc_text, (legend_x + 45, y_offset + 22))
             
             y_offset += 28
+
+    def _draw_lane_markings(self, approach_name: str) -> None:
+        start_distance = 80
+        end_distance = 260
+        dash_length = 20
+        dash_gap = 10
+        
+        # Six-lane setup: three inbound (left at -40, straight -20, right 0), three outbound (left 0, straight 20, right 40)
+        # Center divider at 0
+        inbound_lane_boundaries = [-50, -40, -20, 0]  # left edge, L|S boundary, S|R boundary, center divider
+        outbound_lane_boundaries = [0, 20, 40, 50]  # center divider, L|S boundary, S|R boundary, right edge
+        
+        # Outer road edges (solid)
+        for lateral in [-50, 50]:
+            start = self._point_on_approach(approach_name, start_distance, lateral)
+            end = self._point_on_approach(approach_name, end_distance, lateral)
+            pygame.draw.line(self.screen, self.LIGHT_GRAY, start, end, 3)
+        
+        # Center divider (double solid yellow)
+        for offset in [-1, 1]:
+            start = self._point_on_approach(approach_name, start_distance, offset)
+            end = self._point_on_approach(approach_name, end_distance, offset)
+            pygame.draw.line(self.screen, self.YELLOW, start, end, 2)
+        
+        # Inbound lane markers (dashed white)
+        for lateral in [-40, -20]:
+            distance = start_distance
+            while distance < end_distance:
+                dash_end = min(distance + dash_length, end_distance)
+                seg_start = self._point_on_approach(approach_name, distance, lateral)
+                seg_end = self._point_on_approach(approach_name, dash_end, lateral)
+                pygame.draw.line(self.screen, self.WHITE, seg_start, seg_end, 2)
+                distance += dash_length + dash_gap
+        
+        # Outbound lane markers (dashed white)
+        for lateral in [20, 40]:
+            distance = start_distance
+            while distance < end_distance:
+                dash_end = min(distance + dash_length, end_distance)
+                seg_start = self._point_on_approach(approach_name, distance, lateral)
+                seg_end = self._point_on_approach(approach_name, dash_end, lateral)
+                pygame.draw.line(self.screen, self.WHITE, seg_start, seg_end, 2)
+                distance += dash_length + dash_gap
+
+    def _draw_intersection_status(self) -> None:
+        phase = self._current_phase()
+        label = self.font_small.render(f"Active Phase: {phase}", True, self.WHITE)
+        label_rect = label.get_rect(center=(self.center[0], self.center[1] - 10))
+        self.screen.blit(label, label_rect)
+
+    def _current_phase(self) -> str:
+        if self.system_metrics.get("active_phase"):
+            return self.system_metrics["active_phase"]
+        for state in self.intersection_states.values():
+            return state.get("phase", str(TrafficPhase.NS_STRAIGHT_RIGHT))
+        return str(TrafficPhase.NS_STRAIGHT_RIGHT)
+
+    def _point_on_approach(self, name: str, distance: float, lateral: float) -> Tuple[int, int]:
+        cfg = self.approach_configs[name]
+        vec_x, vec_y = cfg["vector"]
+        perp_x, perp_y = -vec_y, vec_x
+        x = self.center[0] + vec_x * distance + perp_x * lateral
+        y = self.center[1] + vec_y * distance + perp_y * lateral
+        return int(x), int(y)
+
+    def _create_approach_polygon(self, vector: Tuple[float, float]) -> List[Tuple[int, int]]:
+        base_offset = 60
+        inner_half = 45  # expanded to accommodate six lanes
+        outer_half = 105  # wider outer boundary
+        length = 270
+        perp = (-vector[1], vector[0])
+        base_center = (
+            self.center[0] + vector[0] * base_offset,
+            self.center[1] + vector[1] * base_offset
+        )
+        far_center = (
+            self.center[0] + vector[0] * length,
+            self.center[1] + vector[1] * length
+        )
+        return [
+            self._offset_point(base_center, perp, inner_half),
+            self._offset_point(far_center, perp, outer_half),
+            self._offset_point(far_center, perp, -outer_half),
+            self._offset_point(base_center, perp, -inner_half)
+        ]
+
+    def _offset_point(self, point: Tuple[float, float], perp: Tuple[float, float], offset: float) -> Tuple[int, int]:
+        return (
+            int(point[0] + perp[0] * offset),
+            int(point[1] + perp[1] * offset)
+        )
+
+    def _create_center_diamond(self) -> List[Tuple[int, int]]:
+        radius = 90
+        cx, cy = self.center
+        return [
+            (cx, cy - radius),
+            (cx + radius, cy),
+            (cx, cy + radius),
+            (cx - radius, cy)
+        ]
 
 
 # Global instance
