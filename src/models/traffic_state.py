@@ -12,15 +12,19 @@ from datetime import datetime
 
 
 class TrafficPhase(Enum):
-    """Multi-phase plan combining straight/right, left-only, and clearance states."""
+    """Multi-phase plan combining straight/right, left-only, yellow, and clearance states."""
 
     NS_STRAIGHT_RIGHT = "NS_SR"
+    NS_YELLOW = "NS_YELLOW"
     CLEARANCE_NS_TO_EW = "CLR_NS_EW"
     EW_STRAIGHT_RIGHT = "EW_SR"
+    EW_YELLOW = "EW_YELLOW"
     CLEARANCE_EW_TO_NSLEFT = "CLR_EW_NSLEFT"
     NS_LEFT_ONLY = "NS_LEFT"
+    NS_LEFT_YELLOW = "NS_LEFT_YELLOW"
     CLEARANCE_NSLEFT_TO_EWLEFT = "CLR_NSLEFT_EWLEFT"
     EW_LEFT_ONLY = "EW_LEFT"
+    EW_LEFT_YELLOW = "EW_LEFT_YELLOW"
     CLEARANCE_EWLEFT_TO_NS = "CLR_EWLEFT_NS"
 
     def next(self) -> 'TrafficPhase':
@@ -30,6 +34,11 @@ class TrafficPhase(Enum):
 
     def is_clearance(self) -> bool:
         return self not in PHASE_MOVEMENTS
+
+    def is_yellow(self) -> bool:
+        """Check if phase is a yellow/amber transition."""
+        return self in {TrafficPhase.NS_YELLOW, TrafficPhase.EW_YELLOW,
+                        TrafficPhase.NS_LEFT_YELLOW, TrafficPhase.EW_LEFT_YELLOW}
 
     def is_left_phase(self) -> bool:
         return self in {TrafficPhase.NS_LEFT_ONLY, TrafficPhase.EW_LEFT_ONLY}
@@ -67,23 +76,31 @@ class TrafficPhase(Enum):
 
 PHASE_SEQUENCE: List[TrafficPhase] = [
     TrafficPhase.NS_STRAIGHT_RIGHT,
+    TrafficPhase.NS_YELLOW,
     TrafficPhase.CLEARANCE_NS_TO_EW,
     TrafficPhase.EW_STRAIGHT_RIGHT,
+    TrafficPhase.EW_YELLOW,
     TrafficPhase.CLEARANCE_EW_TO_NSLEFT,
     TrafficPhase.NS_LEFT_ONLY,
+    TrafficPhase.NS_LEFT_YELLOW,
     TrafficPhase.CLEARANCE_NSLEFT_TO_EWLEFT,
     TrafficPhase.EW_LEFT_ONLY,
+    TrafficPhase.EW_LEFT_YELLOW,
     TrafficPhase.CLEARANCE_EWLEFT_TO_NS
 ]
 
 PHASE_DISPLAY_NAMES = {
     TrafficPhase.NS_STRAIGHT_RIGHT: "NS Straight+Right",
+    TrafficPhase.NS_YELLOW: "NS Yellow (Straight+Right)",
     TrafficPhase.CLEARANCE_NS_TO_EW: "All-Red (NS->EW)",
     TrafficPhase.EW_STRAIGHT_RIGHT: "EW Straight+Right",
+    TrafficPhase.EW_YELLOW: "EW Yellow (Straight+Right)",
     TrafficPhase.CLEARANCE_EW_TO_NSLEFT: "All-Red (EW->NS Left)",
     TrafficPhase.NS_LEFT_ONLY: "NS Protected Left",
+    TrafficPhase.NS_LEFT_YELLOW: "NS Yellow (Left)",
     TrafficPhase.CLEARANCE_NSLEFT_TO_EWLEFT: "All-Red (NS Left->EW Left)",
     TrafficPhase.EW_LEFT_ONLY: "EW Protected Left",
+    TrafficPhase.EW_LEFT_YELLOW: "EW Yellow (Left)",
     TrafficPhase.CLEARANCE_EWLEFT_TO_NS: "All-Red (EW Left->NS)"
 }
 
@@ -110,7 +127,7 @@ class TrafficLightState:
     queue_left: int = 0
     queue_right: int = 0
 
-    neighbor_queues: Dict[str, int] = field(default_factory=dict)
+    neighbor_queues: Dict[str, Dict[str, int]] = field(default_factory=dict)
     neighbor_axes: Dict[str, str] = field(default_factory=dict)
 
     cycle_count: int = 0
@@ -156,7 +173,10 @@ class TrafficLightState:
         if not self.neighbor_queues:
             return 0.0
         from src.settings import MAX_QUEUE
-        total_pressure = sum(queue / MAX_QUEUE for queue in self.neighbor_queues.values())
+        total_pressure = 0.0
+        for neighbor_queues_dict in self.neighbor_queues.values():
+            neighbor_total = sum(neighbor_queues_dict.values())
+            total_pressure += neighbor_total / MAX_QUEUE
         return total_pressure / len(self.neighbor_queues)
 
     def to_dict(self) -> Dict:

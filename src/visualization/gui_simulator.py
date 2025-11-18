@@ -106,10 +106,10 @@ class TrafficGUISimulator:
         self.center_polygon = self._create_center_diamond()
         
         # Six-lane configuration: three inbound (facing intersection), three outbound (leaving)
-        # Inbound offsets: left=-40, straight=-20, right=0 (closest to center divider)
-        # Outbound offsets: left=0 (closest to center divider), straight=20, right=40
-        self.inbound_lane_offsets = {"left": -40, "straight": -20, "right": 0}
-        self.outbound_lane_offsets = {"left": 0, "straight": 20, "right": 40}
+        # Inbound offsets: left=0 (closest to center divider), straight=-20, right=-40
+        # Outbound offsets: left=40, straight=20, right=0 (closest to center divider)
+        self.inbound_lane_offsets = {"left": 0, "straight": -20, "right": -40}
+        self.outbound_lane_offsets = {"left": 40, "straight": 20, "right": 0}
         self.lane_offsets = self.inbound_lane_offsets  # alias for waiting vehicle creation
         self.exit_lane_offsets = self.outbound_lane_offsets  # alias for exit path building
         self.movement_colors = {
@@ -121,8 +121,8 @@ class TrafficGUISimulator:
         self.movement_targets = {
             "TL_NORTH": {"straight": "TL_SOUTH", "left": "TL_EAST", "right": "TL_WEST"},
             "TL_SOUTH": {"straight": "TL_NORTH", "left": "TL_WEST", "right": "TL_EAST"},
-            "TL_EAST": {"straight": "TL_WEST", "left": "TL_NORTH", "right": "TL_SOUTH"},
-            "TL_WEST": {"straight": "TL_EAST", "left": "TL_SOUTH", "right": "TL_NORTH"}
+            "TL_EAST": {"straight": "TL_WEST", "left": "TL_SOUTH", "right": "TL_NORTH"},
+            "TL_WEST": {"straight": "TL_EAST", "left": "TL_NORTH", "right": "TL_SOUTH"}
         }
         
         self.vehicle_spawn_distance = 280

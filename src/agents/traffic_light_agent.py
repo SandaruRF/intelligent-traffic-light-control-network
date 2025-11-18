@@ -26,8 +26,16 @@ from src.settings import (
     BASE_GREEN_TIME,
     MIN_GREEN_TIME,
     MAX_GREEN_TIME,
+    MIN_GREEN_STRAIGHT,
+    MIN_GREEN_LEFT,
+    P1_GREEN_TIME,
+    P2_GREEN_TIME,
+    P3_GREEN_TIME,
+    P4_GREEN_TIME,
     MAX_QUEUE,
     ADJUSTMENT_FACTOR,
+    PHASE_SPEEDUP_FACTOR,
+    QUEUE_RELIEF_TARGET,
     SENSOR_PERIOD,
     CONTROL_PERIOD,
     COORDINATION_PERIOD,
@@ -35,13 +43,11 @@ from src.settings import (
     ARRIVAL_RATE,
     DEPARTURE_RATE,
     YELLOW_LIGHT_DURATION,
+    ALL_RED_CLEARANCE,
     get_neighbor_jids
 )
 
-AXIS_LEADERS = {
-    "NS": "TL_NORTH",
-    "EW": "TL_EAST"
-}
+PHASE_COORDINATOR = "TL_NORTH"
 
 
 class SensorBehaviour(PeriodicBehaviour):
@@ -110,19 +116,24 @@ class SignalControlBehaviour(PeriodicBehaviour):
     """
     
     async def run(self) -> None:
-        """Execute signal control logic."""
+        """Execute signal control logic with real-time adaptive adjustments."""
         state: TrafficLightState = self.agent.state
         
         # Decrement green time
         state.green_time_remaining = max(0.0, state.green_time_remaining - CONTROL_PERIOD)
         
+        # ADAPTIVE REAL-TIME ADJUSTMENT: Check if we should dynamically adjust green time
+        if self.agent.is_phase_master and state.green_time_remaining > 0:
+            if not state.current_phase.is_yellow() and not state.current_phase.is_clearance():
+                await self._maybe_adjust_green_time()
+        
         # Check if time to switch phase
         if state.green_time_remaining <= 0:
-            if self.agent.is_axis_leader:
+            if self.agent.is_phase_master:
                 await self._switch_phase()
             else:
-                # Followers wait for leader broadcast; avoid negative timers
-                state.green_time_remaining = MIN_GREEN_TIME
+                # Followers wait for master broadcast; clamp at zero to reflect pending update
+                state.green_time_remaining = 0.0
         
         # Log current status
         self._log_status()
@@ -131,49 +142,135 @@ class SignalControlBehaviour(PeriodicBehaviour):
         """
         Switch to next phase and calculate optimal green time.
         
-        CORE SELF-ORGANIZING ALGORITHM:
-        - Compare my pressure to neighbor average
-        - Adjust green time accordingly
-        - System optimizes without central control!
+        Industry four-phase cycle with yellow and all-red intervals:
+        P1 (NS straight+right) → yellow → all-red → P2 (EW straight+right) → yellow → all-red →
+        P3 (NS left) → yellow → all-red → P4 (EW left) → yellow → all-red → repeat
         """
         state: TrafficLightState = self.agent.state
         old_phase = state.current_phase
         next_phase = state.current_phase.next()
         state.current_phase = next_phase
 
-        if next_phase.is_clearance():
-            new_green_time = self.agent.clearance_duration
+        if next_phase.is_yellow():
+            new_green_time = YELLOW_LIGHT_DURATION
+            phase_mode = "Yellow"
+        elif next_phase.is_clearance():
+            new_green_time = ALL_RED_CLEARANCE
+            phase_mode = "All-Red"
         else:
+            # Movement phase: compute adaptive green respecting phase-specific minimums
             new_green_time = self._calculate_adaptive_green_time()
             state.cycle_count += 1
+            phase_mode = "Movement"
 
         state.green_time_remaining = new_green_time
 
         for msg in self.agent.create_phase_update_messages(next_phase, new_green_time):
             await self.send(msg)
 
-        phase_mode = "Clearance" if next_phase.is_clearance() else "Movement"
         self.agent.log(
             f"🔄 Leader switched phase: {old_phase} -> {next_phase} "
             f"({phase_mode} {new_green_time:.1f}s)"
         )
     
+    async def _maybe_adjust_green_time(self) -> None:
+        """Dynamically adjust green time based on real-time queue conditions."""
+        state: TrafficLightState = self.agent.state
+        active_axis = state.current_phase.active_axis()
+        
+        if active_axis is None:
+            return
+        
+        # Determine movement type and get pressures
+        phase_is_straight = state.current_phase.is_straight_phase()
+        phase_is_left = state.current_phase.is_left_phase()
+        
+        if phase_is_straight:
+            min_green = MIN_GREEN_STRAIGHT
+            relevant_movements = ["straight", "right"]
+        elif phase_is_left:
+            min_green = MIN_GREEN_LEFT
+            relevant_movements = ["left"]
+        else:
+            return
+        
+        opposite_axis = "EW" if active_axis == "NS" else "NS"
+        current_pressure = self.agent.estimate_movement_pressure(active_axis, relevant_movements)
+        opposite_pressure = self.agent.estimate_movement_pressure(opposite_axis, relevant_movements)
+        
+        # Get actual queue counts for more precise switching
+        current_total_queue = 0
+        opposite_total_queue = 0
+        
+        for direction, queues_dict in state.neighbor_queues.items():
+            axis = state.neighbor_axes.get(direction, state.axis)
+            total = sum(queues_dict.values())
+            if axis == active_axis:
+                current_total_queue += total
+            elif axis == opposite_axis:
+                opposite_total_queue += total
+        
+        # Add own queue
+        if state.axis == active_axis:
+            current_total_queue += state.get_total_queue()
+        elif state.axis == opposite_axis:
+            opposite_total_queue += state.get_total_queue()
+        
+        # IMMEDIATE SWITCH: If current queue is very low (0-5 cars) and opposite queue is significantly higher
+        if current_total_queue <= 5 and opposite_total_queue > current_total_queue * 2 and opposite_total_queue > 10:
+            self.agent.log(
+                f"🚀 IMMEDIATE SWITCH: Current {active_axis} queue={current_total_queue} (empty), "
+                f"Opposite {opposite_axis} queue={opposite_total_queue} (high) → Switching now!",
+                "INFO"
+            )
+            # Force immediate phase switch by setting timer to 0
+            state.green_time_remaining = 0.0
+            return
+        
+        # EMERGENCY CUT SHORT: If opposite axis is CRITICALLY congested and current is empty
+        # Made less aggressive: only at 85% opposite and 10% current
+        if opposite_pressure > 0.85 and current_pressure < 0.10:
+            if state.green_time_remaining > min_green:
+                old_time = state.green_time_remaining
+                # Cut to minimum green (never below)
+                state.green_time_remaining = max(min_green, 5.0)
+                self.agent.log(
+                    f"⚡ EMERGENCY CUT: Opposite {opposite_axis} pressure={opposite_pressure:.2f}, current={current_pressure:.2f} "
+                    f"→ Reducing green from {old_time:.1f}s to {state.green_time_remaining:.1f}s",
+                    "INFO"
+                )
+                # Broadcast updated green time to followers
+                for msg in self.agent.create_phase_update_messages(state.current_phase, state.green_time_remaining):
+                    await self.send(msg)
+        
+        # EXTENSION: If current axis still has heavy demand and we're near end
+        elif current_pressure > 0.6 and state.green_time_remaining < 5.0:
+            if state.green_time_remaining + 10.0 <= MAX_GREEN_TIME:
+                old_time = state.green_time_remaining
+                state.green_time_remaining = min(state.green_time_remaining + 8.0, MAX_GREEN_TIME)
+                self.agent.log(
+                    f"⚡ EXTENSION: Current {active_axis} pressure={current_pressure:.2f} "
+                    f"→ Extending green from {old_time:.1f}s to {state.green_time_remaining:.1f}s",
+                    "INFO"
+                )
+                # Broadcast updated green time to followers
+                for msg in self.agent.create_phase_update_messages(state.current_phase, state.green_time_remaining):
+                    await self.send(msg)
+    
+    
     def _calculate_adaptive_green_time(self) -> float:
         """
-        Calculate optimal green time using enhanced coordination algorithm.
+        Calculate optimal green time using multi-agent coordination.
         
-        Enhanced Algorithm:
-        1. Calculate my directional pressure (normalized queue length)
-        2. Compare with opposite direction (internal balance)
-        3. Consider average neighbor pressure (network coordination)
-        4. Apply intelligent adjustments:
-           - If current direction >> opposite: give max green
-           - If current direction < opposite: reduce green quickly
-           - Otherwise: use neighbor-based coordination
-        5. Apply limits
+        Algorithm:
+        1. Determine phase type (straight/right vs protected left) and axis
+        2. Compute per-movement pressure across own approach + axis partners
+        3. Compare current axis demand vs opposite axis demand
+        4. Apply adaptive scaling within min/max bounds per phase type
+        5. Consider neighbor pressure for distributed optimization
         
         Returns:
-            Optimal green time in seconds
+            Adaptive green time in seconds (respects industry minimums)
         """
         state: TrafficLightState = self.agent.state
         active_axis = state.current_phase.active_axis()
@@ -181,43 +278,109 @@ class SignalControlBehaviour(PeriodicBehaviour):
         if active_axis is None:
             return YELLOW_LIGHT_DURATION
         
-        opposite_axis = "EW" if active_axis == "NS" else "NS"
-        current_pressure = self.agent.estimate_axis_pressure(active_axis)
-        opposite_pressure = self.agent.estimate_axis_pressure(opposite_axis)
+        # Phase-specific configuration
+        phase_is_straight = state.current_phase.is_straight_phase()
+        phase_is_left = state.current_phase.is_left_phase()
         
-        # Step 2: Get average neighbor pressure
+        if phase_is_straight:
+            # P1 or P2: N+S or E+W straight+right
+            min_green = MIN_GREEN_STRAIGHT
+            base_green = P1_GREEN_TIME if active_axis == "NS" else P2_GREEN_TIME
+            max_green = MAX_GREEN_TIME
+            relevant_movements = ["straight", "right"]
+        elif phase_is_left:
+            # P3 or P4: N+S or E+W protected left
+            min_green = MIN_GREEN_LEFT
+            base_green = P3_GREEN_TIME if active_axis == "NS" else P4_GREEN_TIME
+            max_green = max(MIN_GREEN_LEFT, MAX_GREEN_TIME * 0.5)
+            relevant_movements = ["left"]
+        else:
+            return BASE_GREEN_TIME
+        
+        # Compute axis-level demand for current and opposite directions
+        opposite_axis = "EW" if active_axis == "NS" else "NS"
+        current_pressure = self.agent.estimate_movement_pressure(active_axis, relevant_movements)
+        opposite_pressure = self.agent.estimate_movement_pressure(opposite_axis, relevant_movements)
+        
+        # Get average neighbor pressure for coordination
         avg_neighbor_pressure = state.get_average_neighbor_pressure()
         
-        # Step 3: Enhanced decision logic (respecting phase type)
-        phase_is_straight = state.current_phase.is_straight_phase()
-        base_green = BASE_GREEN_TIME if phase_is_straight else max(MIN_GREEN_TIME, BASE_GREEN_TIME * 0.7)
-        max_green = MAX_GREEN_TIME if phase_is_straight else max(MIN_GREEN_TIME, MAX_GREEN_TIME * 0.7)
-        
-        # Case 1: Current direction is MUCH busier than opposite (2x threshold)
-        if current_pressure > opposite_pressure * 2.0 and current_pressure > 0.3:
+        # Decision logic with industry constraints and queue-responsive behavior
+        reason_parts = []
+        if current_pressure < 0.05 and opposite_pressure > 0.4:
+            # Almost no current demand and opposite has queue: use minimum green
+            new_green_time = min_green
+            reason_parts.append("No demand, opposite waiting")
+        elif current_pressure < 0.05 and opposite_pressure < 0.1:
+            # Low traffic overall: use minimum to keep cycle moving
+            new_green_time = min_green
+            reason_parts.append("Light traffic overall")
+        elif opposite_pressure > 0.8 and current_pressure < 0.2:
+            # Heavy opposite axis congestion with low current demand: reduce but respect minimum
+            new_green_time = min_green + (base_green - min_green) * 0.3
+            reason_parts.append(f"Opposite {opposite_axis} critically congested ({opposite_pressure:.2f})")
+        elif current_pressure > 0.7:
+            # Heavy current axis congestion: maximize green time
             new_green_time = max_green
-            reason = "Heavy current direction"
-        
-        # Case 2: Opposite direction is busier - switch quickly
-        elif opposite_pressure > current_pressure * 1.5:
-            new_green_time = MIN_GREEN_TIME
-            reason = "Opposite direction needs service"
-        
-        # Case 3: Balanced locally - use neighbor coordination
+            reason_parts.append(f"Heavy {active_axis} congestion ({current_pressure:.2f})")
+        elif current_pressure > opposite_pressure * 2.0 and current_pressure > 0.3:
+            # Current axis significantly higher demand
+            new_green_time = base_green + (max_green - base_green) * 0.5
+            reason_parts.append(f"{active_axis} priority (2x demand)")
+        elif opposite_pressure > current_pressure * 2.0 and opposite_pressure > 0.3:
+            # Opposite axis significantly higher demand: reduce current
+            new_green_time = min_green + (base_green - min_green) * 0.5
+            reason_parts.append(f"Reduce for {opposite_axis} (2x demand)")
         else:
-            pressure_diff = current_pressure - avg_neighbor_pressure
-            adjustment = pressure_diff * ADJUSTMENT_FACTOR
-            new_green_time = base_green + adjustment
-            reason = "Neighbor coordination"
+            # Balanced or both low: use base time or pressure-based adjustment
+            if current_pressure < 0.15 and opposite_pressure < 0.15:
+                # Both axes low traffic: use base time to ensure fair cycling
+                new_green_time = base_green
+                reason_parts.append("Balanced low traffic")
+            else:
+                # Use pressure-based adaptive adjustment
+                pressure_ratio = current_pressure / max(0.01, opposite_pressure)
+                if pressure_ratio > 1.2:
+                    adjustment = (pressure_ratio - 1.0) * ADJUSTMENT_FACTOR * 10
+                elif pressure_ratio < 0.8:
+                    adjustment = -(1.0 - pressure_ratio) * ADJUSTMENT_FACTOR * 10
+                else:
+                    # Nearly balanced, use neighbor coordination
+                    pressure_diff = current_pressure - avg_neighbor_pressure
+                    adjustment = pressure_diff * ADJUSTMENT_FACTOR
+                new_green_time = base_green + adjustment
+                reason_parts.append(f"Adaptive (ratio={pressure_ratio:.2f})")
+
+        # Queue relief bias: if opposite has significantly more backlog, trim current phase
+        queue_gap = opposite_pressure - current_pressure
+        if queue_gap > QUEUE_RELIEF_TARGET and current_pressure < 0.65:
+            before = new_green_time
+            new_green_time = max(min_green, new_green_time * (1.0 - QUEUE_RELIEF_TARGET))
+            reason_parts.append(
+                f"Accelerated {active_axis} by {(before - new_green_time):.1f}s for {opposite_axis} relief"
+            )
+        elif queue_gap < -QUEUE_RELIEF_TARGET:
+            before = new_green_time
+            boost = 1.0 + (QUEUE_RELIEF_TARGET * 0.5)
+            new_green_time = min(max_green, new_green_time * boost)
+            reason_parts.append(
+                f"Extended {active_axis} by {(new_green_time - before):.1f}s to clear backlog"
+            )
+
+        # Global speed-up for non-critical phases to increase cycle throughput
+        if current_pressure < 0.65:
+            new_green_time *= PHASE_SPEEDUP_FACTOR
+            reason_parts.append(f"Speedup x{PHASE_SPEEDUP_FACTOR:.2f}")
         
-        # Step 4: Enforce limits
-        new_green_time = max(MIN_GREEN_TIME, min(max_green, new_green_time))
+        # Enforce bounds
+        new_green_time = max(min_green, min(max_green, new_green_time))
         
         # Debug logging
         self.agent.log(
-            f"📊 Phase {state.current_phase}: Current={current_pressure:.2f}, Opposite={opposite_pressure:.2f}, "
-            f"Neighbors={avg_neighbor_pressure:.2f} -> Green={new_green_time:.1f}s ({reason})",
-            "DEBUG"
+            f"📊 Phase {state.current_phase.name}: Axis {active_axis} moves={relevant_movements} | "
+            f"Current pressure={current_pressure:.2f} Opposite pressure={opposite_pressure:.2f} | "
+            f"→ Green={new_green_time:.1f}s ({'; '.join(reason_parts)})",
+            "INFO"
         )
         
         return new_green_time
@@ -276,9 +439,12 @@ class CoordinationBehaviour(PeriodicBehaviour):
         
         # Log occasionally
         if state.cycle_count % 5 == 0 and neighbor_jids:
+            total_q = state.get_total_queue()
             self.agent.log(
-                f"📤 Sent coordination to {len(neighbor_jids)} neighbors "
-                f"(Total queue: {state.get_total_queue()})"
+                f"📤 Coordination: {self.agent.approach_direction} Total={total_q} "
+                f"Queues[S:{state.queue_straight} L:{state.queue_left} R:{state.queue_right}] "
+                f"→ {len(neighbor_jids)} neighbors",
+                "INFO"
             )
 
 
@@ -318,17 +484,18 @@ class MessageHandlerBehaviour(CyclicBehaviour):
             return
         
         # Extract neighbor information
-        neighbor_name = data.get("from", "Unknown")
-        neighbor_total_queue = data.get("total_queue", 0)
+        neighbor_approach = data.get("approach", "Unknown")
+        neighbor_queues_dict = data.get("queues", {})
         
-        # Update neighbor queue information
-        state.neighbor_queues[neighbor_name] = neighbor_total_queue
-        state.neighbor_axes[neighbor_name] = data.get("axis", state.axis)
+        # Update neighbor queue information with per-movement data
+        state.neighbor_queues[neighbor_approach] = neighbor_queues_dict
+        state.neighbor_axes[neighbor_approach] = data.get("axis", state.axis)
         
         # Log receipt (occasionally to avoid spam)
         if state.cycle_count % 10 == 0:
+            total_q = sum(neighbor_queues_dict.values())
             self.agent.log(
-                f"📥 Received from {neighbor_name}: Queue={neighbor_total_queue}"
+                f"📥 Received from {neighbor_approach}: Queues={neighbor_queues_dict} (Total={total_q})"
             )
 
     def _apply_phase_update(self, data: Dict) -> None:
@@ -417,7 +584,7 @@ class TrafficLightAgent(BaseTrafficAgent):
         
         self.intersection_name = intersection_name
         self.approach_direction = self._infer_direction(intersection_name)
-        self.is_axis_leader = AXIS_LEADERS.get(self._axis_label) == intersection_name
+        self.is_phase_master = intersection_name == PHASE_COORDINATOR
         self.coordinator_jid = coordinator_jid
         
         # Get neighbor JIDs from topology
@@ -436,14 +603,9 @@ class TrafficLightAgent(BaseTrafficAgent):
             arrival_rate=ARRIVAL_RATE,
             departure_rate=DEPARTURE_RATE
         )
-        self.clearance_duration = YELLOW_LIGHT_DURATION
         
         self.log(f"🚦 Approach {self.approach_direction} initialized as part of four-way junction")
         self.log(f"   Neighbors: {[jid.split('@')[0] for jid in self.neighbor_jids]}")
-
-    @property
-    def _axis_label(self) -> str:
-        return "NS" if self.approach_direction in ("N", "S") else "EW"
 
     @staticmethod
     def _infer_direction(name: str) -> str:
@@ -466,9 +628,9 @@ class TrafficLightAgent(BaseTrafficAgent):
             total_queue += self.state.get_total_queue()
             participants += 1
 
-        for name, queue in self.state.neighbor_queues.items():
+        for name, queues_dict in self.state.neighbor_queues.items():
             if self.state.neighbor_axes.get(name) == axis:
-                total_queue += queue
+                total_queue += sum(queues_dict.values())
                 participants += 1
 
         if participants == 0:
@@ -476,6 +638,48 @@ class TrafficLightAgent(BaseTrafficAgent):
 
         normalized = total_queue / (MAX_QUEUE * participants)
         return min(1.0, max(0.0, normalized))
+
+    def estimate_movement_pressure(self, axis: str, movements: List[str]) -> float:
+        """Estimate pressure for specific movements (straight/right/left) on an axis."""
+        state = self.state
+
+        if axis == "NS":
+            approaches = ["N", "S"]
+        elif axis == "EW":
+            approaches = ["E", "W"]
+        else:
+            return 0.0
+
+        total_queue = 0.0
+        max_possible = 0.0
+
+        for approach in approaches:
+            if approach == self.approach_direction:
+                # Use own queues directly
+                for movement in movements:
+                    if movement == "straight":
+                        total_queue += state.queue_straight
+                    elif movement == "left":
+                        total_queue += state.queue_left
+                    elif movement == "right":
+                        total_queue += state.queue_right
+                    max_possible += MAX_QUEUE
+            else:
+                neighbor_queues = state.neighbor_queues.get(approach, {})
+                for movement in movements:
+                    total_queue += neighbor_queues.get(movement, 0)
+                    max_possible += MAX_QUEUE
+
+        pressure = (total_queue / max_possible) if max_possible > 0 else 0.0
+
+        if self.is_phase_master and state.cycle_count % 3 == 0:
+            self.log(
+                f"🔍 Pressure calc axis={axis} moves={movements} total={total_queue:.0f} "
+                f"capacity={max_possible:.0f} pressure={pressure:.3f}",
+                "DEBUG"
+            )
+
+        return pressure
     
     async def setup(self) -> None:
         """Setup behaviors when agent starts."""

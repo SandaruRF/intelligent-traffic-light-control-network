@@ -21,11 +21,34 @@ XMPP_PORT = int(os.getenv("XMPP_PORT", "5222"))
 # TRAFFIC LIGHT PARAMETERS
 # ============================================================================
 
-# Signal timing constraints (seconds)
-BASE_GREEN_TIME = float(os.getenv("BASE_GREEN_TIME", "5.0"))
-MIN_GREEN_TIME = float(os.getenv("MIN_GREEN_TIME", "2.0"))
-MAX_GREEN_TIME = float(os.getenv("MAX_GREEN_TIME", "10.0"))
-ADJUSTMENT_FACTOR = float(os.getenv("ADJUSTMENT_FACTOR", "3.0"))
+# Industry-standard four-phase timing configuration (seconds)
+# P1: N+S straight & right | P2: E+W straight & right | P3: N+S left | P4: E+W left
+P1_GREEN_TIME = float(os.getenv("P1_GREEN_TIME", "18.0"))  # N+S through/right
+P2_GREEN_TIME = float(os.getenv("P2_GREEN_TIME", "18.0"))  # E+W through/right
+P3_GREEN_TIME = float(os.getenv("P3_GREEN_TIME", "7.0"))   # N+S protected left
+P4_GREEN_TIME = float(os.getenv("P4_GREEN_TIME", "7.0"))   # E+W protected left
+
+# Safety interval configuration
+YELLOW_LIGHT_DURATION = float(os.getenv("YELLOW_LIGHT_DURATION", "3.0"))  # yellow (amber) time
+ALL_RED_CLEARANCE = float(os.getenv("ALL_RED_CLEARANCE", "2.0"))  # all-red clearance between phases
+
+# Minimum timing constraints (safety)
+MIN_GREEN_STRAIGHT = float(os.getenv("MIN_GREEN_STRAIGHT", "8.0"))  # min green for through movements
+MIN_GREEN_LEFT = float(os.getenv("MIN_GREEN_LEFT", "5.0"))  # min green for protected left
+MIN_YELLOW_TIME = 3.0  # minimum yellow duration (urban speed)
+MIN_ALL_RED_TIME = 1.0  # minimum all-red clearance
+
+# Adaptive control bounds (legacy compatibility)
+BASE_GREEN_TIME = float(os.getenv("BASE_GREEN_TIME", "12.0"))  # adaptive baseline
+MIN_GREEN_TIME = float(os.getenv("MIN_GREEN_TIME", "5.0"))  # adaptive minimum
+MAX_GREEN_TIME = float(os.getenv("MAX_GREEN_TIME", "24.0"))  # adaptive maximum
+ADJUSTMENT_FACTOR = float(os.getenv("ADJUSTMENT_FACTOR", "3.5"))  # pressure-based scaling
+PHASE_SPEEDUP_FACTOR = float(os.getenv("PHASE_SPEEDUP_FACTOR", "0.88"))  # global speed multiplier for non-critical greens
+QUEUE_RELIEF_TARGET = float(os.getenv("QUEUE_RELIEF_TARGET", "0.30"))  # desired pressure gap relief
+
+# Computed cycle metrics
+CYCLE_LENGTH = (P1_GREEN_TIME + P2_GREEN_TIME + P3_GREEN_TIME + P4_GREEN_TIME +
+                4 * YELLOW_LIGHT_DURATION + 4 * ALL_RED_CLEARANCE)  # ~90s default
 
 # Queue simulation parameters
 ARRIVAL_RATE = float(os.getenv("ARRIVAL_RATE", "0.3"))  # Probability per second
@@ -37,9 +60,6 @@ SENSOR_PERIOD = 1.0
 CONTROL_PERIOD = 2.0
 COORDINATION_PERIOD = 2.0
 BROADCAST_PERIOD = 3.0
-
-# Yellow light duration (seconds)
-YELLOW_LIGHT_DURATION = 2.0
 
 # ============================================================================
 # NETWORK TOPOLOGY
